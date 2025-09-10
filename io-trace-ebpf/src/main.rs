@@ -62,12 +62,11 @@ pub fn io_trace_issue(ctx: TracePointContext) -> u32 {
 fn try_io_trace_issue(ctx: TracePointContext) -> Result<u32, u32> {
     unsafe {
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
-        let args = &*(ctx.as_ptr() as *const BlockRqIssueArgs);
 
-        let key: RequestKey = RequestKey {
-            dev: args.dev,
-            sector: args.sector,
-        };
+        let dev: u32 = ctx.read_at(8).map_err(|_| 1u32)?;
+        let sector: u64 = ctx.read_at(16).map_err(|_| 1u32)?;
+
+        let key: RequestKey = RequestKey { dev, sector };
         REQUESTS.insert(&key, &time, 0);
         info!(&ctx, "insert request: dev {}, sector {}, time {}", key.dev, key.sector, time);
     }
@@ -86,11 +85,11 @@ pub fn io_trace(ctx: TracePointContext) -> u32 {
 fn try_io_trace(ctx: TracePointContext) -> Result<u32, u32> {
     unsafe {
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
-        let args = &*(ctx.as_ptr() as *const BlockRqCompleteArgs);
-        let key: RequestKey = RequestKey {
-            dev: args.dev,
-            sector: args.sector,
-        };
+
+        let dev: u32 = ctx.read_at(8).map_err(|_| 1u32)?;
+        let sector: u64 = ctx.read_at(16).map_err(|_| 1u32)?;
+
+        let key: RequestKey = RequestKey { dev, sector };
 
         if let Some(issued_time) = REQUESTS.get(&key) {
             let latency = time - *issued_time;
