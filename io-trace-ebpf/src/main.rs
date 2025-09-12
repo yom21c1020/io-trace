@@ -59,6 +59,21 @@ fn dev_to_maj_min(dev: u32) -> (u32, u32) {
     (maj, min)
 }
 
+fn parse_bio(bio_ptr: u64) -> Result<(u32, u64), u32> {
+    unsafe {
+        let bi_bdev = helpers::bpf_probe_read_kernel((bio_ptr + 8) as *const u64).map_err(|_| 1u32)?;
+        if bi_bdev == 0 { return Err(0) }
+
+        // u64 + u64 + 8byte + 8byte + 8byte + 8byte(ulong) + 4byte = 64 + 64 + 64 + 64 = 256 + 64 + 64 = 384 + 32 = 416bits == 52bytes
+        let bd_dev: u32 = helpers::bpf_probe_read_kernel((bi_bdev + 52) as *const u32).map_err(|_| 1u32)?;
+
+        // u64 + u64 + blk_opf_t(__u32) + u16 + u16 + enum rw_hint(8) + u8 + blk_status_t(u8) + atomic_t(i32)
+        // 8 + 8 + 4 + 2 + 2 + 1 + 1 + 1 + 4 == 24 + 7 == 31bytes => align to 32b
+        let bi_sector: u64 = helpers::bpf_probe_read_kernel((bio_ptr + 32) as *const u64).map_err(|_| 1u32)?;
+        return Ok((bd_dev, bi_sector))
+    }
+}
+
 #[kprobe]
 pub fn io_trace_submit_bio(ctx: ProbeContext) -> u32 {
     match try_io_trace_submit_bio(ctx) {
@@ -72,49 +87,47 @@ fn try_io_trace_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
         let req_ptr: u64 = ctx.arg(0).ok_or(1u32)?;     // pointer
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
         
-        let bi_bdev: u64 = helpers::bpf_probe_read_kernel((req_ptr + 8) as *const u64).map_err(|_| 1u32)?; //
-        if bi_bdev == 0 { return Ok(0); }
-        
-        // u64 + u64 + 8byte + 8byte + 8byte + 8byte(ulong) + 4byte = 64 + 64 + 64 + 64 = 256 + 64 + 64 = 384 + 32 = 416bits == 52bytes
-        let bd_dev: u32 = helpers::bpf_probe_read_kernel((bi_bdev + 52) as *const u32).map_err(|_| 1u32)?;
+        let (bd_dev, bi_sector) = parse_bio(req_ptr)?;
         let (maj, min) = dev_to_maj_min(bd_dev);
-
-        // u64 + u64 + blk_opf_t(__u32) + u16 + u16 + enum rw_hint(8) + u8 + blk_status_t(u8) + atomic_t(i32)
-        // 8 + 8 + 4 + 2 + 2 + 1 + 1 + 1 + 4 == 24 + 7 == 31bytes => align to 32b
-        let bi_sector: u64 = helpers::bpf_probe_read_kernel((req_ptr + 32) as *const u64).map_err(|_| 1u32)?;
 
         let key: RequestKey = RequestKey { dev: bd_dev, sector: bi_sector };
         BIO_REQUESTS.insert(&key, &time, 0).map_err(|_| 1u32)?;
         info!(&ctx, "insert request (kprobe): dev {} ({}, {}), sector {}, time {}", key.dev, maj, min, key.sector, time);
-
     }
-    //info!(&ctx, "kprobe block_rq_issue called");
     Ok(0)
 }
 
-#[tracepoint]
-pub fn io_trace_issue(ctx: TracePointContext) -> u32 {
-    match try_io_trace_issue(ctx) {
+#[kprobe]
+pub fn io_trace_bio_endio(ctx: ProbeContext) -> u32 {
+    match try_io_trace_bio_endio(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
 
-fn try_io_trace_issue(ctx: TracePointContext) -> Result<u32, u32> {
+fn try_io_trace_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
+        let req_ptr: u64 = ctx.arg(0).ok_or(1u32)?;     // pointer
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
+        
+        let (bd_dev, bi_sector) = parse_bio(req_ptr)?;
+        let (maj, min) = dev_to_maj_min(bd_dev);
 
-        let dev: u32 = ctx.read_at(8).map_err(|_| 1u32)?;
-        let sector: u64 = ctx.read_at(16).map_err(|_| 1u32)?;
+        let key: RequestKey = RequestKey { dev: bd_dev, sector: bi_sector };
 
-        let key: RequestKey = RequestKey { dev, sector };
-        BIO_REQUESTS.insert(&key, &time, 0).map_err(|_| 1u32)?;
-        info!(&ctx, "insert request: dev {}, sector {}, time {}", key.dev, key.sector, time);
+        if let Some(issued_time) = BIO_REQUESTS.get(&key) {
+            let latency = time - *issued_time;
+            //info!(&ctx, "request completed: dev {}, sector {}, latency {}", key.dev, key.sector, latency);
+            info!(&ctx, "request completed (kprobe): dev {} ({}, {}), sector {}, time {}", key.dev, maj, min, key.sector, time);
+            BIO_REQUESTS.remove(&key);
+        } else {
+            //info!(&ctx, "request completed but not found: dev {}, sector {}", key.dev, key.sector);
+            info!(&ctx, "request completed but not found (kprobe): dev {} ({}, {}), sector {}", key.dev, maj, min, key.sector);
+        }
     }
-    //info!(&ctx, "tracepoint block_rq_issue called");
     Ok(0)
 }
-
+/*
 #[tracepoint]
 pub fn io_trace(ctx: TracePointContext) -> u32 {
     match try_io_trace(ctx) {
@@ -140,10 +153,9 @@ fn try_io_trace(ctx: TracePointContext) -> Result<u32, u32> {
             info!(&ctx, "request completed but not found: dev {}, sector {}", key.dev, key.sector);
         }
     }
-    //info!(&ctx, "tracepoint block_rq_complete called");
     Ok(0)
 }
-
+*/
 
 #[cfg(not(test))]
 #[panic_handler]

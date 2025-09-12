@@ -31,9 +31,9 @@ async fn main() -> anyhow::Result<()> {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
-    let program_issue: &mut TracePoint = ebpf.program_mut("io_trace_issue").unwrap().try_into()?;
-    program_issue.load()?;
-    program_issue.attach("block", "block_rq_issue")?;
+    // let program_issue: &mut TracePoint = ebpf.program_mut("io_trace_issue").unwrap().try_into()?;
+    // program_issue.load()?;
+    // program_issue.attach("block", "block_rq_issue")?;
 
     // let program_complete: &mut TracePoint = ebpf.program_mut("io_trace").unwrap().try_into()?;
     // program_complete.load()?;
@@ -42,6 +42,10 @@ async fn main() -> anyhow::Result<()> {
     let program_kprobe_issue: &mut KProbe = ebpf.program_mut("io_trace_submit_bio").unwrap().try_into()?;
     program_kprobe_issue.load()?;
     program_kprobe_issue.attach("submit_bio", 0)?;
+
+    let program_kprobe_endio: &mut KProbe = ebpf.program_mut("io_trace_bio_endio").unwrap().try_into()?;
+    program_kprobe_endio.load()?;
+    program_kprobe_endio.attach("bio_endio", 0)?;
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
