@@ -1,4 +1,4 @@
-use aya::programs::TracePoint;
+use aya::programs::{KProbe,TracePoint};
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
@@ -35,10 +35,13 @@ async fn main() -> anyhow::Result<()> {
     program_issue.load()?;
     program_issue.attach("block", "block_rq_issue")?;
 
-    let program_complete: &mut TracePoint = ebpf.program_mut("io_trace").unwrap().try_into()?;
-    program_complete.load()?;
-    program_complete.attach("block", "block_rq_complete")?;
+    // let program_complete: &mut TracePoint = ebpf.program_mut("io_trace").unwrap().try_into()?;
+    // program_complete.load()?;
+    // program_complete.attach("block", "block_rq_complete")?;
     
+    let program_kprobe_issue: &mut KProbe = ebpf.program_mut("io_trace_submit_bio").unwrap().try_into()?;
+    program_kprobe_issue.load()?;
+    program_kprobe_issue.attach("submit_bio", 0)?;
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");

@@ -14,7 +14,7 @@
 Use `cargo build`, `cargo check`, etc. as normal. Run your program with:
 
 ```shell
-cargo run --release --config 'target."cfg(all())".runner="sudo -E"'
+RUST_LOG=debug cargo run --release --config 'target."cfg(all())".runner="sudo -E"'
 ```
 
 To see the log, use `RUST_LOG` env to `debug`, `info`, etc.
