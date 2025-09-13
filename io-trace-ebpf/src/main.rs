@@ -74,6 +74,16 @@ fn parse_bio(bio_ptr: u64) -> Result<(u32, u64), u32> {
     }
 }
 
+fn get_start_sector(bio_ptr: u64) -> Result<u64, u32> {
+    unsafe {
+        let bi_bdev = helpers::bpf_probe_read_kernel((bio_ptr + 8) as *const u64).map_err(|_| 1u32)?;
+        if bi_bdev == 0 { return Err(0) }
+
+        let bd_start_sect: u64 = helpers::bpf_probe_read_kernel(bi_bdev as *const u64).map_err(|_| 1u32)?;
+        return Ok(bd_start_sect)
+    }
+}
+
 #[kprobe]
 pub fn io_trace_submit_bio(ctx: ProbeContext) -> u32 {
     match try_io_trace_submit_bio(ctx) {
@@ -90,9 +100,11 @@ fn try_io_trace_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
         let (bd_dev, bi_sector) = parse_bio(req_ptr)?;
         let (maj, min) = dev_to_maj_min(bd_dev);
 
-        let key: RequestKey = RequestKey { dev: bd_dev, sector: bi_sector };
+        let bd_start_sect: u64 = get_start_sector(req_ptr)?;
+
+        let key: RequestKey = RequestKey { dev: bd_dev, sector: ( bd_start_sect + bi_sector) };
         BIO_REQUESTS.insert(&key, &time, 0).map_err(|_| 1u32)?;
-        info!(&ctx, "insert request (kprobe): dev {} ({}, {}), sector {}, time {}", key.dev, maj, min, key.sector, time);
+        info!(&ctx, "insert request (kprobe): dev {} ({}, {}), sector {} ({}, {}), time {}", key.dev, maj, min, key.sector, bd_start_sect, bi_sector, time);
     }
     Ok(0)
 }
@@ -113,12 +125,12 @@ fn try_io_trace_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
         let (bd_dev, bi_sector) = parse_bio(req_ptr)?;
         let (maj, min) = dev_to_maj_min(bd_dev);
 
-        let key: RequestKey = RequestKey { dev: bd_dev, sector: bi_sector };
+        let key: RequestKey = RequestKey { dev: bd_dev, sector:  bi_sector };
 
         if let Some(issued_time) = BIO_REQUESTS.get(&key) {
             let latency = time - *issued_time;
             //info!(&ctx, "request completed: dev {}, sector {}, latency {}", key.dev, key.sector, latency);
-            info!(&ctx, "request completed (kprobe): dev {} ({}, {}), sector {}, time {}", key.dev, maj, min, key.sector, time);
+            info!(&ctx, "request completed (kprobe): dev {} ({}, {}), sector {}, time {}", key.dev, maj, min, key.sector, latency);
             BIO_REQUESTS.remove(&key);
         } else {
             //info!(&ctx, "request completed but not found: dev {}, sector {}", key.dev, key.sector);
