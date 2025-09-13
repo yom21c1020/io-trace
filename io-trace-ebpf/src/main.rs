@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::{macros::{kprobe, tracepoint}, programs::{ProbeContext, TracePointContext}};
+use aya_ebpf::{macros::{kprobe}, programs::{ProbeContext}};
 use aya_log_ebpf::info;
 use aya_ebpf::helpers;
 use aya_ebpf::macros::map;
@@ -15,43 +15,6 @@ struct RequestKey {
     dev: u32,
     sector: u64,
 }
-
-/* legacy
-#[allow(dead_code)]
-#[repr(C, packed)]
-struct BlockRqIssueArgs {
-    common_type: u16,
-    common_flags: u8,
-    common_preempt_count: u8,
-    common_pid: i32,
-    dev: u32,
-    _pad: u32,
-    sector: u64,
-    nr_sector: u32,
-    bytes: u32,
-    ioprio: u16,
-    rwbs: [u8; 9],
-    comm: [u8; 16],
-}
-
-#[allow(dead_code)]
-#[repr(C, packed)]
-struct BlockRqCompleteArgs {
-    common_type: u16,
-    common_flags: u8,
-    common_preempt_count: u8,
-    common_pid: i32,
-    dev: u32,
-    _pad1: u32,
-    sector: u64,
-    nr_sector: u32,
-    error: i32,
-    ioprio: u16,
-    rwbs: [u8; 9],
-    _pad2: u8,
-    cmd: [u8; 16],
-}
-*/
 
 fn dev_to_maj_min(dev: u32) -> (u32, u32) {
     let maj: u32 = dev >> 20;
@@ -104,7 +67,7 @@ fn try_io_trace_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
 
         let key: RequestKey = RequestKey { dev: bd_dev, sector: ( bd_start_sect + bi_sector) };
         BIO_REQUESTS.insert(&key, &time, 0).map_err(|_| 1u32)?;
-        info!(&ctx, "insert request (kprobe): dev {} ({}, {}), sector {} ({}, {}), time {}", key.dev, maj, min, key.sector, bd_start_sect, bi_sector, time);
+        info!(&ctx, "insert request: dev {} ({}, {}), sector {} ({}, {}), time {}", key.dev, maj, min, key.sector, bd_start_sect, bi_sector, time);
     }
     Ok(0)
 }
@@ -130,44 +93,15 @@ fn try_io_trace_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
         if let Some(issued_time) = BIO_REQUESTS.get(&key) {
             let latency = time - *issued_time;
             //info!(&ctx, "request completed: dev {}, sector {}, latency {}", key.dev, key.sector, latency);
-            info!(&ctx, "request completed (kprobe): dev {} ({}, {}), sector {}, time {}", key.dev, maj, min, key.sector, latency);
+            info!(&ctx, "request completed: dev {} ({}, {}), sector {}, time {}", key.dev, maj, min, key.sector, latency);
             BIO_REQUESTS.remove(&key);
         } else {
             //info!(&ctx, "request completed but not found: dev {}, sector {}", key.dev, key.sector);
-            info!(&ctx, "request completed but not found (kprobe): dev {} ({}, {}), sector {}", key.dev, maj, min, key.sector);
+            info!(&ctx, "request completed but not found: dev {} ({}, {}), sector {}", key.dev, maj, min, key.sector);
         }
     }
     Ok(0)
 }
-/*
-#[tracepoint]
-pub fn io_trace(ctx: TracePointContext) -> u32 {
-    match try_io_trace(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
-
-fn try_io_trace(ctx: TracePointContext) -> Result<u32, u32> {
-    unsafe {
-        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
-
-        let dev: u32 = ctx.read_at(8).map_err(|_| 1u32)?;
-        let sector: u64 = ctx.read_at(16).map_err(|_| 1u32)?;
-
-        let key: RequestKey = RequestKey { dev, sector };
-
-        if let Some(issued_time) = BIO_REQUESTS.get(&key) {
-            let latency = time - *issued_time;
-            info!(&ctx, "request completed: dev {}, sector {}, latency {}", key.dev, key.sector, latency);
-            BIO_REQUESTS.remove(&key);
-        } else {
-            info!(&ctx, "request completed but not found: dev {}, sector {}", key.dev, key.sector);
-        }
-    }
-    Ok(0)
-}
-*/
 
 #[cfg(not(test))]
 #[panic_handler]
