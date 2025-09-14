@@ -1,4 +1,4 @@
-use aya::programs::{KProbe};
+use aya::programs::KProbe;
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
@@ -30,12 +30,14 @@ async fn main() -> anyhow::Result<()> {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {e}");
     }
-    
-    let program_kprobe_issue: &mut KProbe = ebpf.program_mut("io_trace_submit_bio").unwrap().try_into()?;
+
+    let program_kprobe_issue: &mut KProbe =
+        ebpf.program_mut("bio_submit_bio").unwrap().try_into()?;
     program_kprobe_issue.load()?;
     program_kprobe_issue.attach("submit_bio", 0)?;
 
-    let program_kprobe_endio: &mut KProbe = ebpf.program_mut("io_trace_bio_endio").unwrap().try_into()?;
+    let program_kprobe_endio: &mut KProbe =
+        ebpf.program_mut("bio_bio_endio").unwrap().try_into()?;
     program_kprobe_endio.load()?;
     program_kprobe_endio.attach("bio_endio", 0)?;
 
