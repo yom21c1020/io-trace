@@ -3,6 +3,7 @@
 
 mod read_macros;
 mod vmlinux;
+mod nvme;
 
 use core::mem::offset_of;
 
@@ -11,7 +12,8 @@ use aya_ebpf::macros::map;
 use aya_ebpf::{macros::kprobe, programs::ProbeContext};
 use aya_log_ebpf::info;
 
-use vmlinux::{bio, block_device, bvec_iter};
+use vmlinux::{bio, block_device, bvec_iter, blk_mq_hw_ctx};
+use nvme::{nvme_queue, nvme_dev};
 
 #[map]
 static BIO_REQUESTS: aya_ebpf::maps::HashMap<RequestKey, u64> =
@@ -34,7 +36,7 @@ fn dev_to_maj_min(dev: u32) -> (u32, u32) {
 
 fn bio_parse(bio_ptr: *const bio) -> Result<(u32, u64), u32> {
     unsafe {
-        if ptr_field_is_null!(bio_ptr, bio, bi_bdev, block_device) {
+        if ptr_field_is_null!(bio_ptr, bio, bi_bdev, block_device) {    
             return Err(0);
         }
 
@@ -150,21 +152,23 @@ fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-// #[kprobe]
-// pub fn dev_nvme_queue_rq(ctx: ProbeContext) -> u32 {
-//     match try_dev_nvme_queue_rq(ctx) {
-//         Ok(ret) => ret,
-//         Err(ret) => ret,
-//     }
-// }
-//
-// pub fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
-//     unsafe {
-//         let _hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(1u32)?;
-//         // Implementation incomplete - placeholder
-//         Ok(0)
-//     }
-// }
+#[kprobe]
+pub fn dev_nvme_queue_rq(ctx: ProbeContext) -> u32 {
+    match try_dev_nvme_queue_rq(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+pub fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
+    unsafe {
+        let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(1u32)?;
+        let nvmeq_ptr: *const nvme_queue = read_ptr_field!(hctx_ptr, blk_mq_hw_ctx, driver_data, nvme_queue).map_err(|_| 1u32)?;
+        let dev_ptr: *const nvme_dev = read_ptr_field!(nvmeq_ptr, nvme_queue, dev, nvme_dev).map_err(|_| 1u32)?;
+
+        Ok(0)
+    }
+}
 
 #[cfg(not(test))]
 #[panic_handler]
