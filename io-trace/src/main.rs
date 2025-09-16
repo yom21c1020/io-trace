@@ -31,15 +31,24 @@ async fn main() -> anyhow::Result<()> {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
-    let program_kprobe_issue: &mut KProbe =
+    let program_bio_submit_bio: &mut KProbe =
         ebpf.program_mut("bio_submit_bio").unwrap().try_into()?;
-    program_kprobe_issue.load()?;
-    program_kprobe_issue.attach("submit_bio", 0)?;
+    program_bio_submit_bio.load()?;
+    program_bio_submit_bio.attach("submit_bio", 0)?;
 
-    let program_kprobe_endio: &mut KProbe =
+    let program_bio_bio_endio: &mut KProbe =
         ebpf.program_mut("bio_bio_endio").unwrap().try_into()?;
-    program_kprobe_endio.load()?;
-    program_kprobe_endio.attach("bio_endio", 0)?;
+    program_bio_bio_endio.load()?;
+    program_bio_bio_endio.attach("bio_endio", 0)?;
+
+    let program_dev_nvme_queue_rq: &mut KProbe =
+        ebpf.program_mut("dev_nvme_queue_rq").unwrap().try_into()?;
+    program_dev_nvme_queue_rq.load()?;
+    program_dev_nvme_queue_rq.attach("nvme_queue_rq", 0)?;
+
+    let program_dev_nvme_complete_rq: &mut KProbe = ebpf.program_mut("dev_nvme_complete_rq").unwrap().try_into()?;
+    program_dev_nvme_complete_rq.load()?;
+    program_dev_nvme_complete_rq.attach("nvme_complete_rq", 0);
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");

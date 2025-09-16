@@ -49,11 +49,7 @@ where
             index % 8
         };
         let mask = 1 << bit_index;
-        if val {
-            byte | mask
-        } else {
-            byte & !mask
-        }
+        if val { byte | mask } else { byte & !mask }
     }
     #[inline]
     pub fn set_bit(&mut self, index: usize, val: bool) {
@@ -22997,7 +22993,44 @@ impl devlink_port_attrs {
         }
     }
     #[inline]
-    pub fn new_bitfield_1(split: u8_, splittable: u8_) -> __BindgenBitfieldUnit<[u8; 1usize]> {
+    pub fn no_phys_port_name(&self) -> u8_ {
+        unsafe { ::core::mem::transmute(self._bitfield_1.get(2usize, 1u8) as u8) }
+    }
+    #[inline]
+    pub fn set_no_phys_port_name(&mut self, val: u8_) {
+        unsafe {
+            let val: u8 = ::core::mem::transmute(val);
+            self._bitfield_1.set(2usize, 1u8, val as u64)
+        }
+    }
+    #[inline]
+    pub unsafe fn no_phys_port_name_raw(this: *const Self) -> u8_ {
+        unsafe {
+            ::core::mem::transmute(<__BindgenBitfieldUnit<[u8; 1usize]>>::raw_get(
+                ::core::ptr::addr_of!((*this)._bitfield_1),
+                2usize,
+                1u8,
+            ) as u8)
+        }
+    }
+    #[inline]
+    pub unsafe fn set_no_phys_port_name_raw(this: *mut Self, val: u8_) {
+        unsafe {
+            let val: u8 = ::core::mem::transmute(val);
+            <__BindgenBitfieldUnit<[u8; 1usize]>>::raw_set(
+                ::core::ptr::addr_of_mut!((*this)._bitfield_1),
+                2usize,
+                1u8,
+                val as u64,
+            )
+        }
+    }
+    #[inline]
+    pub fn new_bitfield_1(
+        split: u8_,
+        splittable: u8_,
+        no_phys_port_name: u8_,
+    ) -> __BindgenBitfieldUnit<[u8; 1usize]> {
         let mut __bindgen_bitfield_unit: __BindgenBitfieldUnit<[u8; 1usize]> = Default::default();
         __bindgen_bitfield_unit.set(0usize, 1u8, {
             let split: u8 = unsafe { ::core::mem::transmute(split) };
@@ -23006,6 +23039,10 @@ impl devlink_port_attrs {
         __bindgen_bitfield_unit.set(1usize, 1u8, {
             let splittable: u8 = unsafe { ::core::mem::transmute(splittable) };
             splittable as u64
+        });
+        __bindgen_bitfield_unit.set(2usize, 1u8, {
+            let no_phys_port_name: u8 = unsafe { ::core::mem::transmute(no_phys_port_name) };
+            no_phys_port_name as u64
         });
         __bindgen_bitfield_unit
     }
@@ -26038,7 +26075,7 @@ pub struct elevator_mq_ops {
     pub init_sched: ::core::option::Option<
         unsafe extern "C" fn(
             arg1: *mut request_queue,
-            arg2: *mut elevator_type,
+            arg2: *mut elevator_queue,
         ) -> ::aya_ebpf::cty::c_int,
     >,
     pub exit_sched: ::core::option::Option<unsafe extern "C" fn(arg1: *mut elevator_queue)>,
@@ -26101,11 +26138,19 @@ pub struct elevator_mq_ops {
 #[derive(Copy, Clone)]
 pub struct elevator_queue {
     pub type_: *mut elevator_type,
+    pub et: *mut elevator_tags,
     pub elevator_data: *mut ::aya_ebpf::cty::c_void,
     pub kobj: kobject,
     pub sysfs_lock: mutex,
     pub flags: ::aya_ebpf::cty::c_ulong,
     pub hash: [hlist_head; 64usize],
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct elevator_tags {
+    pub nr_hw_queues: ::aya_ebpf::cty::c_uint,
+    pub nr_requests: ::aya_ebpf::cty::c_uint,
+    pub tags: __IncompleteArrayField<*mut blk_mq_tags>,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -65054,4 +65099,3 @@ pub struct xsk_tx_metadata_ops {
         unsafe extern "C" fn(arg1: u64_, arg2: *mut ::aya_ebpf::cty::c_void),
     >,
 }
-
