@@ -8,7 +8,7 @@ mod vmlinux;
 use aya_ebpf::helpers;
 use aya_ebpf::macros::map;
 use aya_ebpf::{macros::kprobe, programs::ProbeContext};
-use aya_log_ebpf::info;
+use aya_log_ebpf::{debug, info};
 
 // use nvme::{nvme_dev, nvme_queue};
 use vmlinux::{bio, blk_mq_queue_data, block_device, bvec_iter, request};
@@ -48,6 +48,7 @@ fn bio_parse(bio_ptr: *const bio) -> Result<(u32, u64), u32> {
             u32
         )
         .map_err(|_| ERR_CODE)?;
+
         let bi_sector: u64 = read_field!(bio_ptr, bio, bi_iter, bvec_iter)
             .map_err(|_| ERR_CODE)?
             .bi_sector;
@@ -81,7 +82,7 @@ pub fn bio_submit_bio(ctx: ProbeContext) -> u32 {
 
 fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
-        let req_ptr: *const bio = ctx.arg(0).ok_or(1u32)?; // pointer
+        let req_ptr: *const bio = ctx.arg(0).ok_or(ERR_CODE)?; // pointer
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         let (bd_dev, bi_sector) = bio_parse(req_ptr)?;
@@ -119,7 +120,7 @@ pub fn bio_bio_endio(ctx: ProbeContext) -> u32 {
 
 fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
-        let req_ptr: *const bio = ctx.arg(0).ok_or(1u32)?;
+        let req_ptr: *const bio = ctx.arg(0).ok_or(ERR_CODE)?;
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         let (bd_dev, bi_sector) = bio_parse(req_ptr)?;
@@ -168,9 +169,11 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
-        // let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(1u32)?;
-        let bd_ptr: *const blk_mq_queue_data = ctx.arg(1).ok_or(1u32)?;
-
+        // let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(ERR_CODE)?;
+        let bd_ptr: *const blk_mq_queue_data = ctx.arg(1).ok_or(ERR_CODE)?;
+        if ptr_field_is_null!(bd_ptr, blk_mq_queue_data, rq, request) {
+            return Err(0);
+        }
         let bio_ptr: *const bio = read_ptr_field!(
             read_ptr_field!(bd_ptr, blk_mq_queue_data, rq, request).map_err(|_| ERR_CODE)?,
             request,
@@ -211,15 +214,33 @@ pub fn dev_nvme_complete_rq(ctx: ProbeContext) -> u32 {
 fn try_dev_nvme_complete_rq(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
-        let req_ptr: *const request = ctx.arg(0).ok_or(1u32)?;
-        let bio_ptr: *const bio = read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+        let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
+        //        let bio_ptr: *const bio =
+        //            read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
 
-        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        //        let (bd_dev, bi_sector) = {
+        //            match(bio_parse(bio_ptr)) {
+        //                Ok(ret) => ret,
+        //                Err(ret) => {
+        //                    (0, 0)
+        //                },
+        //            }
+        //        };
+        //        if bd_dev == 0 {
+        //            debug!(&ctx, "bd_dev is null");
+        //        }
+        let part_ptr: *const block_device =
+            read_ptr_field!(req_ptr, request, part, block_device).map_err(|_| ERR_CODE)?;
+        debug!(&ctx, "part_ptr loaded: {}", part_ptr as usize);
+        let bd_dev: u32 = read_field!(part_ptr, block_device, bd_dev, u32).map_err(|_| ERR_CODE)?;
+        debug!(&ctx, "bd_dev loaded: {}", bd_dev);
+        let __sector: u64 = read_field!(req_ptr, request, __sector, u64).map_err(|_| ERR_CODE)?;
+        debug!(&ctx, "__sector loaded: {}", __sector);
+
         let (maj, min) = dev_to_maj_min(bd_dev);
-
         let key: RequestKey = RequestKey {
             dev: bd_dev,
-            sector: bi_sector,
+            sector: __sector,
         };
 
         if let Some(issued_time) = DEV_REQUESTS.get(&key) {
@@ -237,7 +258,7 @@ fn try_dev_nvme_complete_rq(ctx: ProbeContext) -> Result<u32, u32> {
         } else {
             info!(
                 &ctx,
-                "request completed but not found: dev {} ({}, {}), sector {}",
+                "nvme request completed but not found: dev {} ({}, {}), sector {}",
                 key.dev,
                 maj,
                 min,

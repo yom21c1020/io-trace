@@ -46,9 +46,10 @@ async fn main() -> anyhow::Result<()> {
     program_dev_nvme_queue_rq.load()?;
     program_dev_nvme_queue_rq.attach("nvme_queue_rq", 0)?;
 
-    let program_dev_nvme_complete_rq: &mut KProbe = ebpf.program_mut("dev_nvme_complete_rq").unwrap().try_into()?;
+    let program_dev_nvme_complete_rq: &mut KProbe = 
+        ebpf.program_mut("dev_nvme_complete_rq").unwrap().try_into()?;
     program_dev_nvme_complete_rq.load()?;
-    program_dev_nvme_complete_rq.attach("nvme_complete_rq", 0);
+    program_dev_nvme_complete_rq.attach("nvme_complete_rq", 0)?;
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
