@@ -22,9 +22,8 @@ static BIO_REQUESTS: aya_ebpf::maps::HashMap<RequestKey, u64> =
 //     aya_ebpf::maps::HashMap::<RequestKey, u64>::with_max_entries(10240, 0);
 
 #[map]
-static DEV_REQUESTS: aya_ebpf::maps::HashMap<u64, u64> =
+static DEV_REQUESTS: aya_ebpf::maps::HashMap<usize, u64> =
     aya_ebpf::maps::HashMap::<usize, u64>::with_max_entries(10240, 0);
-
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -180,25 +179,26 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
         if ptr_field_is_null!(bd_ptr, blk_mq_queue_data, rq, request) {
             return Err(0);
         }
-        let bio_ptr: *const bio = read_ptr_field!(
-            read_ptr_field!(bd_ptr, blk_mq_queue_data, rq, request).map_err(|_| ERR_CODE)?,
-            request,
-            bio,
-            bio
-        )
-        .map_err(|_| ERR_CODE)?;
+        let req_ptr: *const request =
+            read_ptr_field!(bd_ptr, blk_mq_queue_data, rq, request).map_err(|_| ERR_CODE)?;
 
-        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-        let (maj, min) = dev_to_maj_min(bd_dev);
+        let bio_ptr: *const bio =
+            read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
 
-        let key = read_ptr_field!(bd_ptr, blk_mq_queue_data, rq, request).map_err(|_| ERR_CODE)? as u64;
+        //        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        //        let (maj, min) = dev_to_maj_min(bd_dev);
+
+        let key = req_ptr as usize;
         DEV_REQUESTS.insert(&key, &time, 0).map_err(|_| ERR_CODE)?;
         info!(
             &ctx,
-            "nvme queue request: request ptr {}, time {}",
-            key,
-            time
+            "nvme queue request: request ptr {}, time {}", key, time
         );
+
+        // info!(
+        //     &ctx,
+        //     "queue requested on dev ({}, {}), sector {}", maj, min, bi_sector
+        // );
         Ok(0)
     }
 }
@@ -215,25 +215,31 @@ fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
-        
+
         let key = req_ptr as usize;
 
         if let Some(issued_time) = DEV_REQUESTS.get(&key) {
             let latency = time - *issued_time;
             info!(
                 &ctx,
-                "nvme request completed: request ptr {}, latency {}",
-                key,
-                latency
+                "nvme request completed: request ptr {}, latency {}", key, latency
             );
             DEV_REQUESTS.remove(&key).map_err(|_| ERR_CODE)?;
         } else {
             info!(
                 &ctx,
-                "nvme request completed but not found: request ptr {}",
-                key
+                "nvme request completed but not found: request ptr {}", key
             );
         }
+        // let bio_ptr: *const bio =
+        //     read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+        //
+        // let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        // let (maj, min) = dev_to_maj_min(bd_dev);
+        // info!(
+        //     &ctx,
+        //     "request completed on dev ({}, {}), sector {}", maj, min, bi_sector
+        // );
     }
     Ok(0)
 }
