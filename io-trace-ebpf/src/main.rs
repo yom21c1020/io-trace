@@ -5,13 +5,15 @@ mod nvme;
 mod read_macros;
 mod vmlinux;
 
-use aya_ebpf::helpers::{self, bpf_probe_read_kernel};
+use aya_ebpf::helpers::{self};
 use aya_ebpf::macros::map;
 use aya_ebpf::{macros::kprobe, programs::ProbeContext};
 use aya_log_ebpf::{debug, info};
 
 // use nvme::{nvme_dev, nvme_queue};
-use vmlinux::{bio, blk_mq_queue_data, block_device, bvec_iter, request};
+use vmlinux::{address_space, bio, blk_mq_queue_data, block_device, bvec_iter, inode, request};
+
+use crate::vmlinux::dev_t;
 
 #[map]
 static BIO_REQUESTS: aya_ebpf::maps::HashMap<RequestKey, u64> =
@@ -33,6 +35,17 @@ struct RequestKey {
 }
 
 const ERR_CODE: u32 = 1;
+
+const DEV_MAJ: u32 = 259;
+const DEV_MIN: u32 = 5;
+
+fn check_device(maj: u32, min: u32) -> bool {
+    if maj == DEV_MAJ && min == DEV_MIN {
+        return true;
+    } else {
+        return false;
+    }
+}
 
 fn dev_to_maj_min(dev: u32) -> (u32, u32) {
     let maj: u32 = dev >> 20;
@@ -95,6 +108,10 @@ fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
 
         let bd_start_sect: u64 = bio_get_start_sector(req_ptr)?;
 
+        if !check_device(maj, min) {
+            return Ok(0);
+        };
+
         let key: RequestKey = RequestKey {
             dev: bd_dev,
             sector: (bd_start_sect + bi_sector),
@@ -102,7 +119,7 @@ fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
         BIO_REQUESTS.insert(&key, &time, 0).map_err(|_| ERR_CODE)?;
         info!(
             &ctx,
-            "insert request: dev {} ({}, {}), sector {} ({}, {}), time {}",
+            "Block I/O : insert request: dev {} ({}, {}), sector {} ({}, {}), time {}",
             key.dev,
             maj,
             min,
@@ -131,6 +148,10 @@ fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
         let (bd_dev, bi_sector) = bio_parse(req_ptr)?;
         let (maj, min) = dev_to_maj_min(bd_dev);
 
+        if !check_device(maj, min) {
+            return Ok(0);
+        };
+
         let key: RequestKey = RequestKey {
             dev: bd_dev,
             sector: bi_sector,
@@ -140,7 +161,7 @@ fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
             let latency = time - *issued_time;
             info!(
                 &ctx,
-                "request completed: dev {} ({}, {}), sector {}, latency {}",
+                "Block I/O : request completed: dev {} ({}, {}), sector {}, latency {}",
                 key.dev,
                 maj,
                 min,
@@ -151,7 +172,7 @@ fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
         } else {
             info!(
                 &ctx,
-                "request completed but not found: dev {} ({}, {}), sector {}",
+                "Block I/O : request completed but not found: dev {} ({}, {}), sector {}",
                 key.dev,
                 maj,
                 min,
@@ -185,20 +206,24 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
         let bio_ptr: *const bio =
             read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
 
-        //        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-        //        let (maj, min) = dev_to_maj_min(bd_dev);
+        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        let (maj, min) = dev_to_maj_min(bd_dev);
+
+        if !check_device(maj, min) {
+            return Ok(0);
+        };
 
         let key = req_ptr as usize;
         DEV_REQUESTS.insert(&key, &time, 0).map_err(|_| ERR_CODE)?;
-        info!(
-            &ctx,
-            "nvme queue request: request ptr {}, time {}", key, time
-        );
-
         // info!(
         //     &ctx,
-        //     "queue requested on dev ({}, {}), sector {}", maj, min, bi_sector
+        //     "nvme queue request: request ptr {}, time {}", key, time
         // );
+
+        info!(
+            &ctx,
+            "NVMe      : queue requested on dev ({}, {}), sector {}", maj, min, bi_sector
+        );
         Ok(0)
     }
 }
@@ -218,30 +243,86 @@ fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
 
         let key = req_ptr as usize;
 
+        let bio_ptr: *const bio =
+            read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+
+        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        let (maj, min) = dev_to_maj_min(bd_dev);
+
+        if !check_device(maj, min) {
+            return Ok(0);
+        };
+
+        info!(
+            &ctx,
+            "NVMe      : Completed: dev ({}, {}), sector {}", maj, min, bi_sector
+        );
+
         if let Some(issued_time) = DEV_REQUESTS.get(&key) {
             let latency = time - *issued_time;
             info!(
                 &ctx,
-                "nvme request completed: request ptr {}, latency {}", key, latency
+                "NVMe      : request completed: request ptr {}, latency {}", key, latency
             );
             DEV_REQUESTS.remove(&key).map_err(|_| ERR_CODE)?;
         } else {
             info!(
                 &ctx,
-                "nvme request completed but not found: request ptr {}", key
+                "NVMe      : request completed but not found: request ptr {}", key
             );
         }
-        // let bio_ptr: *const bio =
-        //     read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
-        //
-        // let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-        // let (maj, min) = dev_to_maj_min(bd_dev);
-        // info!(
-        //     &ctx,
-        //     "request completed on dev ({}, {}), sector {}", maj, min, bi_sector
-        // );
     }
     Ok(0)
+}
+
+#[kprobe]
+pub fn fs_btree_writepages(ctx: ProbeContext) -> u32 {
+    match try_fs_btree_writepages(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_fs_btree_writepages(ctx: ProbeContext) -> Result<u32, u32> {
+    unsafe {
+        let mapping_ptr: *const address_space = ctx.arg(0).ok_or(ERR_CODE)?;
+        let inode_ptr: *const inode =
+            read_ptr_field!(mapping_ptr, address_space, host, inode).map_err(|_| ERR_CODE)?;
+        debug!(
+            &ctx,
+            "btree_writepages: mapping: {}, inode: {}", mapping_ptr as usize, inode_ptr as usize
+        );
+        Ok(0)
+    }
+}
+
+#[kprobe]
+pub fn fs_btrfs_writepages(ctx: ProbeContext) -> u32 {
+    match try_fs_btrfs_writepages(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_fs_btrfs_writepages(ctx: ProbeContext) -> Result<u32, u32> {
+    unsafe {
+        let mapping_ptr: *const address_space = ctx.arg(0).ok_or(ERR_CODE)?;
+        let inode_ptr: *const inode =
+            read_ptr_field!(mapping_ptr, address_space, host, inode).map_err(|_| ERR_CODE)?;
+
+        debug!(
+            &ctx,
+            "btrfs_writepages: mapping: {}, inode ptr: {}",
+            mapping_ptr as usize,
+            inode_ptr as usize
+        );
+
+        let i_rdev: dev_t = read_field!(inode_ptr, inode, i_rdev, dev_t).map_err(|_| ERR_CODE)?;
+        let (maj, min) = dev_to_maj_min(i_rdev);
+
+        debug!(&ctx, "btrfs_writepages: dev: {} ({}, {})", i_rdev, maj, min);
+        Ok(0)
+    }
 }
 
 #[cfg(not(test))]

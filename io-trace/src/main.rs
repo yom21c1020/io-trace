@@ -35,23 +35,31 @@ async fn main() -> anyhow::Result<()> {
         ebpf.program_mut("bio_submit_bio").unwrap().try_into()?;
     program_bio_submit_bio.load()?;
     program_bio_submit_bio.attach("submit_bio", 0)?;
-
+    
     let program_bio_bio_endio: &mut KProbe =
         ebpf.program_mut("bio_bio_endio").unwrap().try_into()?;
     program_bio_bio_endio.load()?;
     program_bio_bio_endio.attach("bio_endio", 0)?;
-
+    
     let program_dev_nvme_queue_rq: &mut KProbe =
         ebpf.program_mut("dev_nvme_queue_rq").unwrap().try_into()?;
     program_dev_nvme_queue_rq.load()?;
     program_dev_nvme_queue_rq.attach("nvme_queue_rq", 0)?;
-
+    
     let program_dev_nvme_complete_batch_req: &mut KProbe = ebpf
         .program_mut("dev_nvme_complete_batch_req")
         .unwrap()
         .try_into()?;
     program_dev_nvme_complete_batch_req.load()?;
     program_dev_nvme_complete_batch_req.attach("nvme_complete_batch_req", 0)?;
+
+    let program_fs_btree_writepages: &mut KProbe = ebpf.program_mut("fs_btree_writepages").unwrap().try_into()?;
+    program_fs_btree_writepages.load()?;
+    program_fs_btree_writepages.attach("btree_writepages", 0)?;
+    
+    let program_fs_btrfs_writepages: &mut KProbe = ebpf.program_mut("fs_btrfs_writepages").unwrap().try_into()?;
+    program_fs_btrfs_writepages.load()?;
+    program_fs_btrfs_writepages.attach("btrfs_writepages", 0)?;
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");

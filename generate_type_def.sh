@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # bio, block_device, bvec_iter for submit_bio() and bio_endio()
-# blk_mq_hw_ctx, blk_mq_queue_data, request for nvme_queue_rq()
+# blk_mq_hw_ctx, blk_mq_queue_data, request for nvme_queue_rq(), nvme_pci_complete_batch()
+# address_space, writeback_control, inode for btree_writepages()
 
 aya-tool generate \
   bio \
@@ -10,6 +11,8 @@ aya-tool generate \
   blk_mq_hw_ctx \
   blk_mq_queue_data \
   request \
+  address_space \
+  writeback_control \
   >io-trace-ebpf/src/vmlinux.rs
 
 # aya-tool generate \
