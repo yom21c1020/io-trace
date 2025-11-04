@@ -2,6 +2,220 @@ use aya::programs::KProbe;
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
+use std::collections::HashMap;
+use aya::maps::perf::AsyncPerfEventArray;
+use aya::util::online_cpus;
+use bytes::BytesMut;
+use std::sync::{Arc, Mutex};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct IoEvent {
+    event_type: u32,
+    timestamp: u64,
+    tgid: u32,
+    pid: u32,
+
+    dev: u32,
+    sector: u64,
+    inode: u64,
+    request_ptr: u64,
+
+    size: u32,
+    flags: u32,
+}
+
+
+// 이벤트 타입
+const EVENT_BTREE_WRITEPAGES:      u32 = 0;
+const EVENT_BTRFS_WRITEPAGES:      u32 = 1;
+const EVENT_BIO_SUBMIT:            u32 = 2;
+const EVENT_BIO_COMPLETE:          u32 = 3;
+const EVENT_NVME_QUEUE:            u32 = 4;
+const EVENT_NVME_COMPLETE:         u32 = 5;
+const EVENT_BLK_MQ_START_REQUEST:  u32 = 6;
+
+const TARGET_TGID: u32 = 9738;
+
+struct IoTracker {
+    // FS 레이어: tgid -> (inode, start_time)
+    btree_requests: HashMap<u32, (u64, u64)>,
+    btrfs_requests: HashMap<u32, (u64, u64)>,
+    
+    // BIO 레이어: (tgid, dev, sector) -> (submit_time, request_ptr)
+    bio_requests: HashMap<(u32, u32, u64), (u64, u64)>,
+    
+    // NVMe 레이어: request_ptr -> (queue_time, bio_info)
+    nvme_requests: HashMap<u64, (u64, u32, u64)>,  // ptr -> (time, dev, sector)
+    nvme_req_tgid: HashMap<u64, u32>,
+    // 통계
+    stats: IoStats,
+}
+
+#[derive(Default, Debug)]
+struct IoStats {
+    fs_to_bio_latency: Vec<u64>,
+    bio_latency: Vec<u64>,
+    nvme_latency: Vec<u64>,
+    total_latency: Vec<u64>,
+}
+
+impl IoTracker {
+    fn new() -> Self {
+        Self {
+            btree_requests: HashMap::new(),
+            btrfs_requests: HashMap::new(),
+            bio_requests: HashMap::new(),
+            nvme_requests: HashMap::new(),
+            nvme_req_tgid: HashMap::new(),
+            stats: IoStats::default(),
+        }
+    }
+
+    fn handle_event(&mut self, event: IoEvent) {
+        match event.event_type {
+            EVENT_BTREE_WRITEPAGES => {
+                self.btree_requests.insert(event.tgid, (event.inode, event.timestamp));
+                println!(
+                    "[{:>12}] btrfs Layer  : btree_writepages started - tgid: {}, inode: {}",
+                    event.timestamp, event.tgid, event.inode
+                );
+            }
+
+            EVENT_BTRFS_WRITEPAGES => {
+                self.btrfs_requests.insert(event.tgid, (event.inode, event.timestamp));
+                println!(
+                    "[{:>12}] btrfs Layer  : writepages started - tgid: {}, inode: {}",
+                    event.timestamp, event.tgid, event.inode
+                );
+            }
+            
+            EVENT_BIO_SUBMIT => {
+                // FS -> BIO 레이턴시 계산
+                if let Some((inode, fs_time)) = self.btrfs_requests.get(&event.tgid) {
+                    let fs_to_bio = event.timestamp - fs_time;
+                    self.stats.fs_to_bio_latency.push(fs_to_bio);
+                    println!(
+                        "[{:>12}] FS->BIO   : tgid: {}, inode: {}, dev: ({},{}), sector: {}, latency: {} ns",
+                        event.timestamp,
+                        event.tgid,
+                        "-",
+                        event.dev >> 20,
+                        event.dev & ((1 << 20) - 1),
+                        event.sector,
+                        fs_to_bio
+                    );
+                }
+                
+                self.bio_requests.insert(
+                    (event.tgid, event.dev, event.sector),
+                    (event.timestamp, event.request_ptr)
+                );
+
+                println!(
+                    "[{:>12}] BIO Submit: tgid: {}, dev: ({},{}), sector: {}, size: {}",
+                    event.timestamp,
+                    event.tgid,
+                    event.dev >> 20,
+                    event.dev & ((1 << 20) - 1),
+                    event.sector,
+                    event.size
+                );
+            }
+            
+            EVENT_BIO_COMPLETE => {
+                if let Some((submit_time, _)) = self.bio_requests.remove(&(event.tgid, event.dev, event.sector)) {
+                    let bio_latency = event.timestamp - submit_time;
+                    self.stats.bio_latency.push(bio_latency);
+                    
+                    println!(
+                        "[{:>12}] BIO Complete: tgid: {}, dev: ({},{}), sector: {}, latency: {} ns",
+                        event.timestamp,
+                        event.tgid,
+                        event.dev >> 20,
+                        event.dev & ((1 << 20) - 1),
+                        event.sector,
+                        bio_latency
+                    );
+                    
+                    // FS 요청 정리
+                    self.btrfs_requests.remove(&event.tgid);
+                }
+            }
+
+            EVENT_BLK_MQ_START_REQUEST => {
+                if event.tgid == TARGET_TGID {
+                    self.nvme_req_tgid.insert(
+                        event.request_ptr,
+                        event.tgid
+                    );
+
+                    println!(
+                        "[{:>12}] BIO Layer  : start req - tgid: {}, ptr: {}",
+                        event.timestamp, event.tgid, event.request_ptr
+                    );
+                }
+            }
+            
+            EVENT_NVME_QUEUE => {
+                if let Some(tgid) = self.nvme_req_tgid.get(&event.request_ptr) {
+                    self.nvme_requests.insert(
+                        event.request_ptr,
+                        (event.timestamp, event.dev, event.sector)
+                    );
+                
+                    println!(
+                        "[{:>12}] NVMe Queue: request_ptr: {:#x}, tgid: {}, dev: ({},{}), sector: {}",
+                        event.timestamp,
+                        event.request_ptr,
+                        tgid,
+                        event.dev >> 20,
+                        event.dev & ((1 << 20) - 1),
+                        event.sector
+                    );
+                }
+            }
+            
+            EVENT_NVME_COMPLETE => {
+                if let Some((queue_time, dev, sector)) = self.nvme_requests.remove(&event.request_ptr) {
+                    let nvme_latency = event.timestamp - queue_time;
+                    self.stats.nvme_latency.push(nvme_latency);
+                    
+                    println!(
+                        "[{:>12}] NVMe Complete: request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
+                        event.timestamp,
+                        event.request_ptr,
+                        dev >> 20,
+                        dev & ((1 << 20) - 1),
+                        sector,
+                        nvme_latency
+                    );
+                }
+            }
+            
+            _ => {}
+        }
+    }
+    
+    fn print_stats(&self) {
+        println!("\n=== I/O Statistics ===");
+        
+        if !self.stats.fs_to_bio_latency.is_empty() {
+            let avg: u64 = self.stats.fs_to_bio_latency.iter().sum::<u64>() / self.stats.fs_to_bio_latency.len() as u64;
+            println!("FS->BIO avg latency: {} ns", avg);
+        }
+        
+        if !self.stats.bio_latency.is_empty() {
+            let avg: u64 = self.stats.bio_latency.iter().sum::<u64>() / self.stats.bio_latency.len() as u64;
+            println!("BIO avg latency: {} ns", avg);
+        }
+        
+        if !self.stats.nvme_latency.is_empty() {
+            let avg: u64 = self.stats.nvme_latency.iter().sum::<u64>() / self.stats.nvme_latency.len() as u64;
+            println!("NVMe avg latency: {} ns", avg);
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {e}");
     }
-
+    // eBPF Probe Initialization
     let program_bio_submit_bio: &mut KProbe =
         ebpf.program_mut("bio_submit_bio").unwrap().try_into()?;
     program_bio_submit_bio.load()?;
@@ -61,9 +275,38 @@ async fn main() -> anyhow::Result<()> {
     program_fs_btrfs_writepages.load()?;
     program_fs_btrfs_writepages.attach("btrfs_writepages", 0)?;
 
+    let program_bio_blk_mq_start_request: &mut KProbe = ebpf.program_mut("bio_blk_mq_start_request").unwrap().try_into()?;
+    program_bio_blk_mq_start_request.load()?;
+    program_bio_blk_mq_start_request.attach("blk_mq_start_request", 0)?;
+
+    // Load user-space tracker
+    let mut perf_array = AsyncPerfEventArray::try_from(ebpf.take_map("EVENTS").unwrap())?;
+    let mut tracker = Arc::new(Mutex::new(IoTracker::new()));
+    
+    for cpu_id in online_cpus().map_err(|(_msg, err)| err)? {
+        let mut buf = perf_array.open(cpu_id, None)?;
+        let tracker_clone = Arc::clone(&tracker);
+        tokio::spawn(async move {
+            let mut buffers = (0..10)
+                .map(|_| BytesMut::with_capacity(std::mem::size_of::<IoEvent>()))
+                .collect::<Vec<_>>();
+            
+            loop {
+                let events = buf.read_events(&mut buffers).await.unwrap();
+                for buf in buffers.iter().take(events.read) {
+                    let event = unsafe {
+                        std::ptr::read_unaligned(buf.as_ptr() as *const IoEvent)
+                    };
+                    tracker_clone.lock().unwrap().handle_event(event);
+                }
+            }
+        });
+    }
+
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
     ctrl_c.await?;
+    tracker.lock().unwrap().print_stats();
     println!("Exiting...");
 
     Ok(())

@@ -346,6 +346,7 @@ dependencies = [
  "aya",
  "aya-build",
  "aya-log",
+ "bytes",
  "env_logger",
  "io-trace-common",
  "io-trace-ebpf",
