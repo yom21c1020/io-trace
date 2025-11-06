@@ -10,3 +10,6 @@ target/
 
 # gprof profiling output
 gmon.out
+
+# logs
+*.log
