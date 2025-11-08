@@ -14,6 +14,7 @@ use aya_log_ebpf::{debug, info};
 // use nvme::{nvme_dev, nvme_queue};
 use vmlinux::{address_space, bio, blk_mq_queue_data, block_device, bvec_iter, inode, request};
 
+use crate::nvme::{blk_mq_hw_ctx, request_queue};
 use crate::vmlinux::dev_t;
 
 #[derive(Clone, Copy)]
@@ -61,7 +62,7 @@ const ERR_CODE: u32 = 1;
 const DEV_MAJ: u32 = 259;
 const DEV_MIN: u32 = 5;
 
-const TARGET_TGID: u32 = 132923;
+const TARGET_TGID: u32 = 979834;
 
 fn check_device(maj: u32, min: u32) -> bool {
     if maj == DEV_MAJ && min == DEV_MIN {
@@ -222,13 +223,14 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
         let pid: u32 = ctx.pid();
+        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
         if !check_tgid(tgid) {
         //    return Ok(0);
         }
 
         let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
-        debug!(&ctx, "eBPF - blk_mq_start_request: ptr: {}, tag: {}", req_ptr as usize, tag);
+        // debug!(&ctx, "eBPF - blk_mq_start_request: ptr: {}, tag: {}", req_ptr as usize, tag);
         let event = IoEvent {
             event_type: EVENT_BLK_MQ_START_REQUEST,
             timestamp: helpers::r#gen::bpf_ktime_get_ns(),
@@ -242,8 +244,16 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
             size: 0,
             flags: 0,
         };
-
         EVENTS.output(&ctx, &event, 0);
+
+        info!(
+            &ctx,
+            "blk_start request : request ptr {:x}, tag {},                              , time {}",
+            req_ptr as u64,
+            tag,
+            time
+        );
+
         Ok(0)
     }
 }
@@ -260,9 +270,9 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
         //if !check_tgid(tgid) { return Ok(0); }
-
+        
         let pid: u32 = ctx.pid();
-        // let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
+        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         // let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(ERR_CODE)?;
         let bd_ptr: *const blk_mq_queue_data = ctx.arg(1).ok_or(ERR_CODE)?;
@@ -298,6 +308,16 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
         };
 
         EVENTS.output(&ctx, &event, 0);
+
+        info!(
+            &ctx,
+            "nvme queue request: request ptr {:x}, tag {}, bio ptr {:x}, time {}",
+            req_ptr as u64,
+            tag,
+            bio_ptr as u64,
+            time
+        );
+
         Ok(0)
     }
 }

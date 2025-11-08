@@ -35,7 +35,7 @@ const EVENT_NVME_QUEUE:            u32 = 4;
 const EVENT_NVME_COMPLETE:         u32 = 5;
 const EVENT_BLK_MQ_START_REQUEST:  u32 = 6;
 
-const TARGET_TGID: u32 = 132923;
+const TARGET_TGID: u32 = 979834;
 
 struct IoTracker {
     // FS 레이어: tgid -> (inode, start_time)
@@ -151,17 +151,11 @@ impl IoTracker {
                 //if event.tgid == TARGET_TGID {
                 //    self.nvme_req_tgid.insert((event.request_ptr, event.tag), (event.dev, event.sector));
                 //
-                //    println!(
-                //        "[{:>12}] blk_mq start: tag: {}, tgid: {}, ptr: {:#x}",
-                //        event.timestamp, event.tag, event.tgid, event.request_ptr
-                //    );
-                //}
-            }
-            EVENT_BLK_MQ_REQ_ALLOC => {
-                println!(
-                    "[{:>12}] blk_mq ptr cached: tag: {}, tgid: {}, ptr: {:#x}",
-                    event.timestamp, event.tag, event.tgid, event.request_ptr
-                );
+                    println!(
+                        "[{:>12}] blk_mq start: tgid: {}, ptr: {:#x}, tag: {}",
+                        event.timestamp, event.tgid, event.request_ptr, event.tag
+                    );
+                // }
             }
 
             EVENT_NVME_QUEUE => {
@@ -191,8 +185,7 @@ impl IoTracker {
                         event.dev >> 20,
                         event.dev & ((1 << 20) - 1),
                         event.sector
-
-                    )
+                    );
                 }
             }
 
