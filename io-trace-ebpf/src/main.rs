@@ -11,7 +11,7 @@ use aya_ebpf::EbpfContext;
 use aya_ebpf::{macros::kprobe, programs::ProbeContext};
 use aya_log_ebpf::{debug, info};
 
-// use nvme::{nvme_dev, nvme_queue};
+use nvme::{nvme_dev, nvme_queue};
 use vmlinux::{address_space, bio, blk_mq_queue_data, block_device, bvec_iter, inode, request};
 
 use crate::nvme::{blk_mq_hw_ctx, request_queue};
@@ -62,7 +62,7 @@ const ERR_CODE: u32 = 1;
 const DEV_MAJ: u32 = 259;
 const DEV_MIN: u32 = 5;
 
-const TARGET_TGID: u32 = 979834;
+const TARGET_TGID: u32 = 1107487;
 
 fn check_device(maj: u32, min: u32) -> bool {
     if maj == DEV_MAJ && min == DEV_MIN {
@@ -225,20 +225,34 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
         let pid: u32 = ctx.pid();
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
         if !check_tgid(tgid) {
-        //    return Ok(0);
+            return Ok(0);
         }
 
         let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
         // debug!(&ctx, "eBPF - blk_mq_start_request: ptr: {}, tag: {}", req_ptr as usize, tag);
+
+        let bio_ptr: *const bio =
+            read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+        let bd_dev: u32 = 0;
+        let bi_sector: u64 = 0;
+        let maj: u32 = 0;
+        let min: u32 = 0;
+        if bio_ptr != core::ptr::null() {
+            //debug!(&ctx, "blk_mq_start_request: bio_ptr: {:x}", bio_ptr as u64);
+            let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+            let (maj, min) = dev_to_maj_min(bd_dev); 
+            //debug!(&ctx, "blk_mq_start_request: dev: ({}, {}), sector {:x}", maj, min, bi_sector);
+        }
+
         let event = IoEvent {
             event_type: EVENT_BLK_MQ_START_REQUEST,
             timestamp: helpers::r#gen::bpf_ktime_get_ns(),
             tgid,
             pid,
             inode: 0,
-            dev: 0,
-            sector: 0,
+            dev: bd_dev,
+            sector: bi_sector,
             request_ptr: req_ptr as u64,
             tag,
             size: 0,
@@ -246,13 +260,13 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
         };
         EVENTS.output(&ctx, &event, 0);
 
-        info!(
-            &ctx,
-            "blk_start request : request ptr {:x}, tag {},                              , time {}",
-            req_ptr as u64,
-            tag,
-            time
-        );
+        //info!(
+        //    &ctx,
+        //    "blk_start request : request ptr {:x}, tag {},                              , time {}",
+        //    req_ptr as u64,
+        //    tag,
+        //    time
+        //);
 
         Ok(0)
     }
@@ -273,8 +287,11 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
         
         let pid: u32 = ctx.pid();
         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
+        
+        //info!(&ctx, "[{}] nvme_queue_rq ENTERED, tgid={}, pid={}", 
+        //      time, tgid, pid);
 
-        // let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(ERR_CODE)?;
+        let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(ERR_CODE)?;
         let bd_ptr: *const blk_mq_queue_data = ctx.arg(1).ok_or(ERR_CODE)?;
         if ptr_field_is_null!(bd_ptr, blk_mq_queue_data, rq, request) {
             return Err(0);
@@ -283,15 +300,18 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
             read_ptr_field!(bd_ptr, blk_mq_queue_data, rq, request).map_err(|_| ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
 
-        let bio_ptr: *const bio =
-            read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+        //let bio_ptr: *const bio =
+        //    read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
 
-        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-        let (maj, min) = dev_to_maj_min(bd_dev);
+        //let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        //let (maj, min) = dev_to_maj_min(bd_dev);
 
-        //        if !check_device(maj, min) {
-        //            return Ok(0);
-        //        };
+        let nvmeq_ptr: *const nvme_queue = read_ptr_field!(hctx_ptr, blk_mq_hw_ctx, driver_data, nvme_queue).map_err(|_| ERR_CODE)?;
+        //let dev_ptr: *const nvme_dev = read_ptr_field!(nvmeq_ptr, nvme_queue, dev, nvme_dev).map_err(|_| ERR_CODE)?;
+
+        //if !check_device(maj, min) {
+        //    return Ok(0);
+        //};
 
         let event = IoEvent {
             event_type: EVENT_NVME_QUEUE,
@@ -299,8 +319,8 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
             tgid,
             pid,
             inode: 0,
-            dev: bd_dev,
-            sector: bi_sector,
+            dev: 0,
+            sector: 0,
             request_ptr: req_ptr as u64,
             tag,
             size: 0,
@@ -309,14 +329,13 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
 
         EVENTS.output(&ctx, &event, 0);
 
-        info!(
-            &ctx,
-            "nvme queue request: request ptr {:x}, tag {}, bio ptr {:x}, time {}",
-            req_ptr as u64,
-            tag,
-            bio_ptr as u64,
-            time
-        );
+        //info!(
+        //    &ctx,
+        //    "nvme queue request: request ptr {:x}, tag {}, time {}",
+        //    req_ptr as u64,
+        //    tag,
+        //    time
+        //);
 
         Ok(0)
     }
@@ -334,21 +353,19 @@ fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         //        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let tgid: u32 = ctx.tgid();
-        if !check_tgid(tgid) {
-            return Ok(0);
-        }
+        // if !check_tgid(tgid) {
+        //     return Ok(0);
+        // }
 
         let pid: u32 = ctx.pid();
         let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
 
-        let key = req_ptr as usize;
-
-        let bio_ptr: *const bio =
-            read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
-
-        let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-        let (maj, min) = dev_to_maj_min(bd_dev);
+        //let bio_ptr: *const bio =
+        //    read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+        //
+        //let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        //let (maj, min) = dev_to_maj_min(bd_dev);
 
         //        if !check_device(maj, min) {
         //            return Ok(0);
@@ -360,8 +377,8 @@ fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
             tgid,
             pid,
             inode: 0,
-            dev: bd_dev,
-            sector: bi_sector,
+            dev: 0,
+            sector: 0,
             request_ptr: req_ptr as u64,
             tag,
             size: 0,

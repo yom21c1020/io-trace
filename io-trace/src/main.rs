@@ -35,7 +35,7 @@ const EVENT_NVME_QUEUE:            u32 = 4;
 const EVENT_NVME_COMPLETE:         u32 = 5;
 const EVENT_BLK_MQ_START_REQUEST:  u32 = 6;
 
-const TARGET_TGID: u32 = 979834;
+const TARGET_TGID: u32 = 1107487;
 
 struct IoTracker {
     // FS 레이어: tgid -> (inode, start_time)
@@ -47,7 +47,7 @@ struct IoTracker {
 
     // NVMe 레이어: request_ptr -> (queue_time, bio_info)
     nvme_requests: HashMap<u64, (u64, u32, u64)>, // ptr -> (time, dev, sector)
-    nvme_req_tgid: HashMap<(u64, i32), (u32, u64)>, // (ptr, tag) -> (dev, sector)
+    nvme_req_tgid: HashMap<i32, (u32, u64, u64)>, // (ptr, tag) -> (dev, sector, ptr)
 
     // 통계
     stats: IoStats,
@@ -148,45 +148,49 @@ impl IoTracker {
             }
 
             EVENT_BLK_MQ_START_REQUEST => {
-                //if event.tgid == TARGET_TGID {
-                //    self.nvme_req_tgid.insert((event.request_ptr, event.tag), (event.dev, event.sector));
-                //
+                if event.tgid == TARGET_TGID {
+                    self.nvme_req_tgid.insert(event.tag, (event.dev, event.sector, event.request_ptr));
+                
                     println!(
                         "[{:>12}] blk_mq start: tgid: {}, ptr: {:#x}, tag: {}",
                         event.timestamp, event.tgid, event.request_ptr, event.tag
                     );
-                // }
+                }
             }
 
             EVENT_NVME_QUEUE => {
-                if let Some((dev, sector)) = self.nvme_req_tgid.remove(&(event.request_ptr, event.tag)) {
+                if let Some((dev, sector, blk_req_ptr)) = self.nvme_req_tgid.remove(&event.tag) {
                     self.nvme_requests.insert(
                         event.request_ptr,
-                        (event.timestamp, event.dev, event.sector),
+                        (event.timestamp, dev, sector),
                     );
                 
                     println!(
-                        "[{:>12}] NVMe Queue: request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}",
+                        "[{:>12}] NVMe Queue: request_ptr: {:#x}, blk_request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}",
                         event.timestamp,
                         event.request_ptr,
+                        blk_req_ptr,
                         event.tag,
                         event.tgid,
-                        event.dev >> 20,
-                        event.dev & ((1 << 20) - 1),
-                        event.sector
+                        dev >> 20,
+                        dev & ((1 << 20) - 1),
+                        sector
                     );
-                } else {
-                    println!(
-                        "[{:>12}] NO MATCH// NVMe Queue: request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}",
-                        event.timestamp,
-                        event.request_ptr,
-                        event.tag,
-                        event.tgid,
-                        event.dev >> 20,
-                        event.dev & ((1 << 20) - 1),
-                        event.sector
-                    );
-                }
+                } 
+                //else {
+                //    self.nvme_requests.insert(
+                //        event.request_ptr,
+                //        (event.timestamp, event.dev, event.sector),
+                //    );
+                //
+                //    println!(
+                //        "[{:>12}] NO MATCH// NVMe Queue: request_ptr: {:#x}, tag: {}, tgid: {}",
+                //        event.timestamp,
+                //        event.request_ptr,
+                //        event.tag,
+                //        event.tgid
+                //    );
+                //}
             }
 
             EVENT_NVME_COMPLETE => {
