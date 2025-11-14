@@ -43,8 +43,9 @@ const EVENT_BTRFS_WRITEPAGES:       u32 = 1;
 const EVENT_BIO_SUBMIT:             u32 = 2;
 const EVENT_BIO_COMPLETE:           u32 = 3;
 const EVENT_NVME_QUEUE:             u32 = 4;
-const EVENT_NVME_COMPLETE:          u32 = 5;
-const EVENT_BLK_MQ_START_REQUEST:   u32 = 6;
+const EVENT_NVME_COMPLETE_BATCH:    u32 = 5;
+const EVENT_NVME_COMPLETE:          u32 = 6;
+const EVENT_BLK_MQ_START_REQUEST:   u32 = 7;
 
 #[map]
 static EVENTS: aya_ebpf::maps::PerfEventArray<IoEvent> = aya_ebpf::maps::PerfEventArray::new(0);
@@ -62,7 +63,7 @@ const ERR_CODE: u32 = 1;
 const DEV_MAJ: u32 = 259;
 const DEV_MIN: u32 = 5;
 
-const TARGET_TGID: u32 = 1107487;
+const TARGET_TGID: u32 = 1624107;
 
 fn check_device(maj: u32, min: u32) -> bool {
     if maj == DEV_MAJ && min == DEV_MIN {
@@ -272,6 +273,67 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
     }
 }
 
+// #[kprobe]
+// pub fn bio_blk_mq_end_request(ctx: ProbeContext) -> u32 {
+//     match try_bio_blk_mq_end_request(ctx) {
+//         Ok(ret) => ret,
+//         Err(ret) => ret,
+//     }
+// }
+// 
+// fn try_bio_blk_mq_end_request(ctx: ProbeContext) -> Result<u32, u32> {
+//     unsafe {
+//         let tgid: u32 = ctx.tgid();
+//         let pid: u32 = ctx.pid();
+//         let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
+//         if !check_tgid(tgid) {
+//             return Ok(0);
+//         }
+// 
+//         let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
+//         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
+//         // debug!(&ctx, "eBPF - blk_mq_end_request: ptr: {}, tag: {}", req_ptr as usize, tag);
+// 
+//         let bio_ptr: *const bio =
+//             read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+//         let bd_dev: u32 = 0;
+//         let bi_sector: u64 = 0;
+//         let maj: u32 = 0;
+//         let min: u32 = 0;
+//         if bio_ptr != core::ptr::null() {
+//             //debug!(&ctx, "blk_mq_end_request: bio_ptr: {:x}", bio_ptr as u64);
+//             let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+//             let (maj, min) = dev_to_maj_min(bd_dev); 
+//             //debug!(&ctx, "blk_mq_end_request: dev: ({}, {}), sector {:x}", maj, min, bi_sector);
+//         }
+// 
+//         let event = IoEvent {
+//             event_type: EVENT_BLK_MQ_END_REQUEST,
+//             timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+//             tgid,
+//             pid,
+//             inode: 0,
+//             dev: bd_dev,
+//             sector: bi_sector,
+//             request_ptr: req_ptr as u64,
+//             tag,
+//             size: 0,
+//             flags: 0,
+//         };
+//         EVENTS.output(&ctx, &event, 0);
+// 
+//         //info!(
+//         //    &ctx,
+//         //    "blk_end request : request ptr {:x}, tag {},                              , time {}",
+//         //    req_ptr as u64,
+//         //    tag,
+//         //    time
+//         //);
+// 
+//         Ok(0)
+//     }
+// }
+
 #[kprobe]
 pub fn dev_nvme_queue_rq(ctx: ProbeContext) -> u32 {
     match try_dev_nvme_queue_rq(ctx) {
@@ -352,6 +414,53 @@ pub fn dev_nvme_complete_batch_req(ctx: ProbeContext) -> u32 {
 fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         //        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
+        let tgid: u32 = ctx.tgid();
+        // if !check_tgid(tgid) {
+        //     return Ok(0);
+        // }
+
+        let pid: u32 = ctx.pid();
+        let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
+        let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
+
+        //let bio_ptr: *const bio =
+        //    read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
+        //
+        //let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+        //let (maj, min) = dev_to_maj_min(bd_dev);
+
+        //        if !check_device(maj, min) {
+        //            return Ok(0);
+        //        };
+
+        let event = IoEvent {
+            event_type: EVENT_NVME_COMPLETE_BATCH,
+            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            tgid,
+            pid,
+            inode: 0,
+            dev: 0,
+            sector: 0,
+            request_ptr: req_ptr as u64,
+            tag,
+            size: 0,
+            flags: 0,
+        };
+        EVENTS.output(&ctx, &event, 0);
+    }
+    Ok(0)
+}
+
+#[kprobe]
+pub fn dev_nvme_complete_rq(ctx: ProbeContext) -> u32 {
+    match try_dev_nvme_complete_rq(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+fn try_dev_nvme_complete_rq(ctx: ProbeContext) -> Result<u32, u32>{
+    unsafe {
+        // let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let tgid: u32 = ctx.tgid();
         // if !check_tgid(tgid) {
         //     return Ok(0);

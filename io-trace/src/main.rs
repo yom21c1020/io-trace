@@ -32,10 +32,11 @@ const EVENT_BTRFS_WRITEPAGES:      u32 = 1;
 const EVENT_BIO_SUBMIT:            u32 = 2;
 const EVENT_BIO_COMPLETE:          u32 = 3;
 const EVENT_NVME_QUEUE:            u32 = 4;
-const EVENT_NVME_COMPLETE:         u32 = 5;
-const EVENT_BLK_MQ_START_REQUEST:  u32 = 6;
+const EVENT_NVME_COMPLETE_BATCH:   u32 = 5;
+const EVENT_NVME_COMPLETE:         u32 = 6;
+const EVENT_BLK_MQ_START_REQUEST:  u32 = 7;
 
-const TARGET_TGID: u32 = 1107487;
+const TARGET_TGID: u32 = 1624107;
 
 struct IoTracker {
     // FS 레이어: tgid -> (inode, start_time)
@@ -44,6 +45,7 @@ struct IoTracker {
 
     // BIO 레이어: (tgid, dev, sector) -> (submit_time, request_ptr)
     bio_requests: HashMap<(u32, u32, u64), (u64, u64)>,
+    bio_requests_ptr: HashMap<u64, u64>, // request_ptr -> time
 
     // NVMe 레이어: request_ptr -> (queue_time, bio_info)
     nvme_requests: HashMap<u64, (u64, u32, u64)>, // ptr -> (time, dev, sector)
@@ -57,6 +59,7 @@ struct IoTracker {
 struct IoStats {
     fs_to_bio_latency: Vec<u64>,
     bio_latency: Vec<u64>,
+    bio_to_nvme_latency: Vec<u64>,
     nvme_latency: Vec<u64>,
     total_latency: Vec<u64>,
 }
@@ -67,6 +70,7 @@ impl IoTracker {
             btree_requests: HashMap::new(),
             btrfs_requests: HashMap::new(),
             bio_requests: HashMap::new(),
+            bio_requests_ptr: HashMap::new(),
             nvme_requests: HashMap::new(),
             nvme_req_tgid: HashMap::new(),
             stats: IoStats::default(),
@@ -115,6 +119,8 @@ impl IoTracker {
                     (event.timestamp, event.request_ptr),
                 );
 
+                self.bio_requests_ptr.insert(event.request_ptr, event.timestamp);
+
                 println!(
                     "[{:>12}] BIO Submit: tgid: {}, dev: ({},{}), sector: {}, size: {}",
                     event.timestamp,
@@ -150,7 +156,7 @@ impl IoTracker {
             EVENT_BLK_MQ_START_REQUEST => {
                 if event.tgid == TARGET_TGID {
                     self.nvme_req_tgid.insert(event.tag, (event.dev, event.sector, event.request_ptr));
-                
+                    
                     println!(
                         "[{:>12}] blk_mq start: tgid: {}, ptr: {:#x}, tag: {}",
                         event.timestamp, event.tgid, event.request_ptr, event.tag
@@ -160,13 +166,19 @@ impl IoTracker {
 
             EVENT_NVME_QUEUE => {
                 if let Some((dev, sector, blk_req_ptr)) = self.nvme_req_tgid.remove(&event.tag) {
+                    let mut latency: u64 = 0;
+                    if let Some(bio_time) = self.bio_requests_ptr.remove(&blk_req_ptr) {
+                        latency = event.timestamp - bio_time;
+                        self.stats.bio_to_nvme_latency.push(latency);
+                    }
+
                     self.nvme_requests.insert(
                         event.request_ptr,
                         (event.timestamp, dev, sector),
                     );
                 
                     println!(
-                        "[{:>12}] NVMe Queue: request_ptr: {:#x}, blk_request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}",
+                        "[{:>12}] NVMe Queue: request_ptr: {:#x}, blk_request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}, latency: {}",
                         event.timestamp,
                         event.request_ptr,
                         blk_req_ptr,
@@ -174,7 +186,8 @@ impl IoTracker {
                         event.tgid,
                         dev >> 20,
                         dev & ((1 << 20) - 1),
-                        sector
+                        sector,
+                        latency
                     );
                 } 
                 //else {
@@ -193,6 +206,24 @@ impl IoTracker {
                 //}
             }
 
+            EVENT_NVME_COMPLETE_BATCH => {
+                if let Some((queue_time, dev, sector)) =
+                    self.nvme_requests.remove(&event.request_ptr)
+                {
+                    let nvme_latency = event.timestamp - queue_time;
+                    self.stats.nvme_latency.push(nvme_latency);
+
+                    println!(
+                        "[{:>12}] NVMe Complete(batch): request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
+                        event.timestamp,
+                        event.request_ptr,
+                        dev >> 20,
+                        dev & ((1 << 20) - 1),
+                        sector,
+                        nvme_latency
+                    );
+                }
+            }
             EVENT_NVME_COMPLETE => {
                 if let Some((queue_time, dev, sector)) =
                     self.nvme_requests.remove(&event.request_ptr)
@@ -201,7 +232,7 @@ impl IoTracker {
                     self.stats.nvme_latency.push(nvme_latency);
 
                     println!(
-                        "[{:>12}] NVMe Complete: request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
+                        "[{:>12}] NVMe Complete       : request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
                         event.timestamp,
                         event.request_ptr,
                         dev >> 20,
@@ -229,6 +260,12 @@ impl IoTracker {
             let avg: u64 =
                 self.stats.bio_latency.iter().sum::<u64>() / self.stats.bio_latency.len() as u64;
             println!("BIO avg latency: {} ns", avg);
+        }
+
+        if !self.stats.bio_to_nvme_latency.is_empty() {
+            let avg: u64 =
+                self.stats.bio_to_nvme_latency.iter().sum::<u64>() / self.stats.bio_to_nvme_latency.len() as u64;
+            println!("BIO->NVMe avg latency: {} ns", avg);
         }
 
         if !self.stats.nvme_latency.is_empty() {
@@ -288,6 +325,13 @@ async fn main() -> anyhow::Result<()> {
         .try_into()?;
     program_dev_nvme_complete_batch_req.load()?;
     program_dev_nvme_complete_batch_req.attach("nvme_complete_batch_req", 0)?;
+
+    let program_dev_nvme_complete_rq: &mut KProbe = ebpf
+        .program_mut("dev_nvme_complete_rq")
+        .unwrap()
+        .try_into()?;
+    program_dev_nvme_complete_rq.load()?;
+    program_dev_nvme_complete_rq.attach("nvme_complete_rq", 0)?;
 
     let program_fs_btree_writepages: &mut KProbe = ebpf
         .program_mut("fs_btree_writepages")
