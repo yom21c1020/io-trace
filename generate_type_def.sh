@@ -13,6 +13,9 @@ aya-tool generate \
   request \
   address_space \
   writeback_control \
+  kiocb \
+  file \
+  inode \
   >io-trace-ebpf/src/vmlinux.rs
 
 # aya-tool generate \

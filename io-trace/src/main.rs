@@ -35,10 +35,17 @@ const EVENT_NVME_QUEUE:            u32 = 4;
 const EVENT_NVME_COMPLETE_BATCH:   u32 = 5;
 const EVENT_NVME_COMPLETE:         u32 = 6;
 const EVENT_BLK_MQ_START_REQUEST:  u32 = 7;
+const EVENT_VFS_WRITE:             u32 = 8;
+const EVENT_VFS_WRITEV:            u32 = 9;
+const EVENT_BTRFS_DO_WRITE_ITER:   u32 = 10;
+const EVENT_COPY_ONE_RANGE:        u32 = 11;
+const EVENT_COPY_ONE_RANGE_RET:    u32 = 12;
 
 const TARGET_TGID: u32 = 1624107;
 
 struct IoTracker {
+    vfs_requests: u64,
+    cache_requests: u64,
     // FS 레이어: tgid -> (inode, start_time)
     btree_requests: HashMap<u32, (u64, u64)>,
     btrfs_requests: HashMap<u32, (u64, u64)>,
@@ -57,6 +64,8 @@ struct IoTracker {
 
 #[derive(Default, Debug)]
 struct IoStats {
+    vfs_to_fs_latency: Vec<u64>,
+    fs_page_cache_latency: Vec<u64>,
     fs_to_bio_latency: Vec<u64>,
     bio_latency: Vec<u64>,
     bio_to_nvme_latency: Vec<u64>,
@@ -67,6 +76,8 @@ struct IoStats {
 impl IoTracker {
     fn new() -> Self {
         Self {
+            vfs_requests: 0,
+            cache_requests: 0,
             btree_requests: HashMap::new(),
             btrfs_requests: HashMap::new(),
             bio_requests: HashMap::new(),
@@ -203,7 +214,7 @@ impl IoTracker {
                 //        event.tag,
                 //        event.tgid
                 //    );
-                //}
+                //} // debug purpose
             }
 
             EVENT_NVME_COMPLETE_BATCH => {
@@ -242,6 +253,50 @@ impl IoTracker {
                     );
                 }
             }
+            
+            EVENT_VFS_WRITE => {
+                println!(
+                        "[{:>12}] vfs_write: tgid: {}, dev: ({}, {}), inode: {}",
+                        event.timestamp,
+                        event.tgid,
+                        (event.dev) >> 20,
+                        (event.dev) & ((1 << 20) - 1),
+                        event.inode
+                    );
+                self.vfs_requests = event.timestamp;
+            }
+
+            EVENT_BTRFS_DO_WRITE_ITER => {
+                println!(
+                        "[{:>12}] btrfs_do_write_iter: tgid: {}, dev: ({}, {}), inode: {}",
+                        event.timestamp,
+                        event.tgid,
+                        (event.dev) >> 20,
+                        (event.dev) & ((1 << 20) - 1),
+                        event.inode
+
+                    );
+                self.stats.vfs_to_fs_latency.push(event.timestamp - self.vfs_requests);
+            }
+            
+            EVENT_COPY_ONE_RANGE => {
+                println!(
+                        "[{:>12}] copy_one_range: tgid: {}",
+                        event.timestamp,
+                        event.tgid,
+                    );
+
+                self.cache_requests = event.timestamp;
+            }
+            
+            EVENT_COPY_ONE_RANGE_RET => {
+                println!(
+                        "[{:>12}] copy_one_range return: tgid: {}",
+                        event.timestamp,
+                        event.tgid
+                    );
+                self.stats.fs_page_cache_latency.push(event.timestamp - self.cache_requests);
+            }
 
             _ => {}
         }
@@ -249,6 +304,19 @@ impl IoTracker {
 
     fn print_stats(&self) {
         println!("\n=== I/O Statistics ===");
+
+        if !self.stats.vfs_to_fs_latency.is_empty() {
+            let avg: u64 = self.stats.vfs_to_fs_latency.iter().sum::<u64>()
+                / self.stats.vfs_to_fs_latency.len() as u64;
+            println!("VFS->FS avg latency: {} ns", avg);
+        }
+
+        if !self.stats.fs_page_cache_latency.is_empty() {
+            let avg: u64 = self.stats.fs_page_cache_latency.iter().sum::<u64>()
+                / self.stats.fs_page_cache_latency.len() as u64;
+            println!("Page Cache avg latency: {} ns", avg);
+        }
+
 
         if !self.stats.fs_to_bio_latency.is_empty() {
             let avg: u64 = self.stats.fs_to_bio_latency.iter().sum::<u64>()
@@ -304,6 +372,14 @@ async fn main() -> anyhow::Result<()> {
         warn!("failed to initialize eBPF logger: {e}");
     }
     // eBPF Probe Initialization
+    let program_vfs_vfs_write: &mut KProbe = ebpf.program_mut("vfs_vfs_write").unwrap().try_into()?;
+    program_vfs_vfs_write.load()?;
+    program_vfs_vfs_write.attach("vfs_write", 0)?;
+
+    let program_fs_btrfs_do_write_iter: &mut KProbe = ebpf.program_mut("fs_btrfs_do_write_iter").unwrap().try_into()?;
+    program_fs_btrfs_do_write_iter.load()?;
+    program_fs_btrfs_do_write_iter.attach("btrfs_do_write_iter", 0)?;
+
     let program_bio_submit_bio: &mut KProbe =
         ebpf.program_mut("bio_submit_bio").unwrap().try_into()?;
     program_bio_submit_bio.load()?;
@@ -353,6 +429,21 @@ async fn main() -> anyhow::Result<()> {
         .try_into()?;
     program_bio_blk_mq_start_request.load()?;
     program_bio_blk_mq_start_request.attach("blk_mq_start_request", 0)?;
+
+    let program_fs_copy_one_range: &mut KProbe = ebpf
+        .program_mut("fs_copy_one_range")
+        .unwrap()
+        .try_into()?;
+    program_fs_copy_one_range.load()?;  
+    program_fs_copy_one_range.attach("copy_one_range", 0)?;
+
+    let program_fs_copy_one_range_ret: &mut KProbe = ebpf
+        .program_mut("fs_copy_one_range_ret")
+        .unwrap()
+        .try_into()?;
+    program_fs_copy_one_range_ret.load()?;  
+    program_fs_copy_one_range_ret.attach("copy_one_range", 0)?;
+
 
     // Load user-space tracker
     let mut perf_array = AsyncPerfEventArray::try_from(ebpf.take_map("EVENTS").unwrap())?;
