@@ -8,11 +8,11 @@ mod vmlinux;
 use aya_ebpf::helpers::{self};
 use aya_ebpf::macros::map;
 use aya_ebpf::EbpfContext;
-use aya_ebpf::{macros::kprobe, programs::ProbeContext};
+use aya_ebpf::{macros::kprobe, macros::kretprobe, programs::ProbeContext, programs::RetProbeContext};
 use aya_log_ebpf::{debug, info};
 
 use nvme::{nvme_dev, nvme_queue};
-use vmlinux::{address_space, bio, blk_mq_queue_data, block_device, bvec_iter, inode, request};
+use vmlinux::{address_space, bio, blk_mq_queue_data, block_device, bvec_iter, inode, request, file, kiocb, super_block};
 
 use crate::nvme::{blk_mq_hw_ctx, request_queue};
 use crate::vmlinux::dev_t;
@@ -38,13 +38,18 @@ pub struct IoEvent {
 }
 
 // 이벤트 타입 상수
-const EVENT_BTREE_WRITEPAGES:       u32 = 0;
-const EVENT_BTRFS_WRITEPAGES:       u32 = 1;
-const EVENT_BIO_SUBMIT:             u32 = 2;
-const EVENT_BIO_COMPLETE:           u32 = 3;
-const EVENT_NVME_QUEUE:             u32 = 4;
-const EVENT_NVME_COMPLETE:          u32 = 5;
-const EVENT_BLK_MQ_START_REQUEST:   u32 = 6;
+const EVENT_BTREE_WRITEPAGES:      u32 = 0;
+const EVENT_BTRFS_WRITEPAGES:      u32 = 1;
+const EVENT_BIO_SUBMIT:            u32 = 2;
+const EVENT_BIO_COMPLETE:          u32 = 3;
+const EVENT_NVME_QUEUE:            u32 = 4;
+const EVENT_NVME_COMPLETE:         u32 = 5;
+const EVENT_BLK_MQ_START_REQUEST:  u32 = 6;
+const EVENT_VFS_WRITE:             u32 = 7;
+const EVENT_VFS_WRITEV:            u32 = 8;
+const EVENT_BTRFS_DO_WRITE_ITER:   u32 = 9;
+const EVENT_COPY_ONE_RANGE:        u32 = 10;
+const EVENT_COPY_ONE_RANGE_RET:    u32 = 11;
 
 #[map]
 static EVENTS: aya_ebpf::maps::PerfEventArray<IoEvent> = aya_ebpf::maps::PerfEventArray::new(0);
@@ -62,7 +67,7 @@ const ERR_CODE: u32 = 1;
 const DEV_MAJ: u32 = 259;
 const DEV_MIN: u32 = 5;
 
-const TARGET_TGID: u32 = 1107487;
+const TARGET_TGID: u32 = 1624107;
 
 fn check_device(maj: u32, min: u32) -> bool {
     if maj == DEV_MAJ && min == DEV_MIN {
@@ -120,6 +125,167 @@ fn bio_get_start_sector(bio_ptr: *const bio) -> Result<u64, u32> {
 }
 
 #[kprobe]
+pub fn fs_copy_one_range(ctx: ProbeContext) -> u32 {
+    match try_fs_copy_one_range(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+fn try_fs_copy_one_range(ctx: ProbeContext) -> Result<u32, u32> {
+    unsafe {
+        let tgid: u32 = ctx.tgid();
+        if !check_tgid(tgid) {
+            return Ok(0);
+        }
+        let pid: u32 = ctx.pid();
+        
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
+
+        let event = IoEvent {
+            event_type: EVENT_COPY_ONE_RANGE,
+            timestamp,
+            tgid,
+            pid,
+            dev: 0,
+            sector: 0,
+            inode: 0,
+            request_ptr: 0,
+            tag: 0,
+            size: 0,
+            flags: 0
+        };
+        EVENTS.output(&ctx, &event, 0);
+
+        Ok(0)
+    }
+    
+}
+
+#[kretprobe]
+pub fn fs_copy_one_range_ret(ctx: RetProbeContext) -> u32 {
+    match try_fs_copy_one_range_ret(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+fn try_fs_copy_one_range_ret(ctx: RetProbeContext) -> Result<u32, u32> {
+    unsafe {
+        let tgid: u32 = ctx.tgid();
+        if !check_tgid(tgid) {
+            return Ok(0);
+        }        
+        let pid: u32 = ctx.pid();
+        
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
+
+        let event = IoEvent {
+            event_type: EVENT_COPY_ONE_RANGE_RET,
+            timestamp,
+            tgid,
+            pid,
+            dev: 0,
+            sector: 0,
+            inode: 0,
+            request_ptr: 0,
+            tag: 0,
+            size: 0,
+            flags: 0
+        };
+        EVENTS.output(&ctx, &event, 0);
+
+        Ok(0)
+    }
+}
+
+#[kprobe]
+pub fn vfs_vfs_write(ctx: ProbeContext) -> u32 {
+    match try_vfs_vfs_write(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+fn try_vfs_vfs_write(ctx: ProbeContext) -> Result<u32, u32> {
+    unsafe {
+        let tgid: u32 = ctx.tgid();
+        if !check_tgid(tgid) {
+            return Ok(0);
+        }
+
+        let pid: u32 = ctx.pid();
+        
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
+        let file: *const file = ctx.arg(0).ok_or(ERR_CODE)?;
+        let f_inode: *const inode = read_ptr_field!(file, file, f_inode, inode).map_err(|_| ERR_CODE)?;
+        
+        let i_sb: *const super_block = read_ptr_field!(f_inode, inode, i_sb, super_block).map_err(|_| ERR_CODE)?;
+        let s_dev: u32 = read_field!(i_sb, super_block, s_dev, dev_t).map_err(|_| ERR_CODE)?;
+        let i_ino: u64 = read_field!(f_inode, inode, i_ino, u64).map_err(|_| ERR_CODE)?;
+
+
+        let event = IoEvent {
+            event_type: EVENT_VFS_WRITE,
+            timestamp,
+            tgid,
+            pid,
+            dev: s_dev,
+            sector: 0,
+            inode: i_ino,
+            request_ptr: 0,
+            tag: 0,
+            size: 0,
+            flags: 0
+        };
+        EVENTS.output(&ctx, &event, 0);
+        Ok(0)
+    }
+}
+
+#[kprobe]
+pub fn fs_btrfs_do_write_iter(ctx: ProbeContext) -> u32 {
+    match try_fs_btrfs_do_write_iter(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+fn try_fs_btrfs_do_write_iter(ctx: ProbeContext) -> Result<u32, u32> {
+    unsafe {
+        let tgid: u32 = ctx.tgid();
+        if !check_tgid(tgid) {
+            return Ok(0);
+        }
+
+        let pid: u32 = ctx.pid();
+        
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
+        let iocb: *const kiocb = ctx.arg(0).ok_or(ERR_CODE)?;
+        let ki_filp: *const file = read_ptr_field!(iocb, kiocb, ki_filp, file).map_err(|_| ERR_CODE)?;
+        let f_inode: *const inode = read_ptr_field!(ki_filp, file, f_inode, inode).map_err(|_| ERR_CODE)?;
+        
+        let i_sb: *const super_block = read_ptr_field!(f_inode, inode, i_sb, super_block).map_err(|_| ERR_CODE)?;
+        let s_dev: u32 = read_field!(i_sb, super_block, s_dev, dev_t).map_err(|_| ERR_CODE)?;
+
+        let i_ino: u64 = read_field!(f_inode, inode, i_ino, u64).map_err(|_| ERR_CODE)?;
+
+        let event = IoEvent {
+            event_type: EVENT_BTRFS_DO_WRITE_ITER,
+            timestamp,
+            tgid,
+            pid,
+            dev: s_dev,
+            sector: 0,
+            inode: i_ino,
+            request_ptr: 0,
+            tag: 0,
+            size: 0,
+            flags: 0
+        };
+        EVENTS.output(&ctx, &event, 0);
+        Ok(0)
+    }
+}
+
+
+#[kprobe]
 pub fn bio_submit_bio(ctx: ProbeContext) -> u32 {
     match try_bio_submit_bio(ctx) {
         Ok(ret) => ret,
@@ -135,8 +301,8 @@ fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
         }
 
         let pid: u32 = ctx.pid();
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let req_ptr: *const bio = ctx.arg(0).ok_or(ERR_CODE)?; // pointer
-        //        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         let (bd_dev, bi_sector) = bio_parse(req_ptr)?;
         let (maj, min) = dev_to_maj_min(bd_dev);
@@ -149,7 +315,7 @@ fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
 
         let event = IoEvent {
             event_type: EVENT_BIO_SUBMIT,
-            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            timestamp,
             tgid,
             pid,
             inode: 0,
@@ -182,8 +348,9 @@ fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
         }
 
         let pid: u32 = ctx.pid();
+
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let req_ptr: *const bio = ctx.arg(0).ok_or(ERR_CODE)?;
-        //        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         let (bd_dev, bi_sector) = bio_parse(req_ptr)?;
         let (maj, min) = dev_to_maj_min(bd_dev);
@@ -194,7 +361,7 @@ fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
 
         let event = IoEvent {
             event_type: EVENT_BIO_COMPLETE,
-            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            timestamp,
             tgid,
             pid,
             inode: 0,
@@ -222,32 +389,31 @@ pub fn bio_blk_mq_start_request(ctx: ProbeContext) -> u32 {
 fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
-        let pid: u32 = ctx.pid();
-        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
         if !check_tgid(tgid) {
             return Ok(0);
         }
 
+        let pid: u32 = ctx.pid();
+
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();        
         let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
-        // debug!(&ctx, "eBPF - blk_mq_start_request: ptr: {}, tag: {}", req_ptr as usize, tag);
 
         let bio_ptr: *const bio =
             read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
         let bd_dev: u32 = 0;
         let bi_sector: u64 = 0;
+        
         let maj: u32 = 0;
         let min: u32 = 0;
         if bio_ptr != core::ptr::null() {
-            //debug!(&ctx, "blk_mq_start_request: bio_ptr: {:x}", bio_ptr as u64);
             let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
             let (maj, min) = dev_to_maj_min(bd_dev); 
-            //debug!(&ctx, "blk_mq_start_request: dev: ({}, {}), sector {:x}", maj, min, bi_sector);
-        }
+        } // try to read device number & sector
 
         let event = IoEvent {
             event_type: EVENT_BLK_MQ_START_REQUEST,
-            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            timestamp,
             tgid,
             pid,
             inode: 0,
@@ -259,15 +425,6 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
             flags: 0,
         };
         EVENTS.output(&ctx, &event, 0);
-
-        //info!(
-        //    &ctx,
-        //    "blk_start request : request ptr {:x}, tag {},                              , time {}",
-        //    req_ptr as u64,
-        //    tag,
-        //    time
-        //);
-
         Ok(0)
     }
 }
@@ -283,13 +440,8 @@ pub fn dev_nvme_queue_rq(ctx: ProbeContext) -> u32 {
 fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
-        //if !check_tgid(tgid) { return Ok(0); }
-        
         let pid: u32 = ctx.pid();
-        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
-        
-        //info!(&ctx, "[{}] nvme_queue_rq ENTERED, tgid={}, pid={}", 
-        //      time, tgid, pid);
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(ERR_CODE)?;
         let bd_ptr: *const blk_mq_queue_data = ctx.arg(1).ok_or(ERR_CODE)?;
@@ -300,12 +452,6 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
             read_ptr_field!(bd_ptr, blk_mq_queue_data, rq, request).map_err(|_| ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
 
-        //let bio_ptr: *const bio =
-        //    read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
-
-        //let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-        //let (maj, min) = dev_to_maj_min(bd_dev);
-
         let nvmeq_ptr: *const nvme_queue = read_ptr_field!(hctx_ptr, blk_mq_hw_ctx, driver_data, nvme_queue).map_err(|_| ERR_CODE)?;
         //let dev_ptr: *const nvme_dev = read_ptr_field!(nvmeq_ptr, nvme_queue, dev, nvme_dev).map_err(|_| ERR_CODE)?;
 
@@ -315,7 +461,7 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
 
         let event = IoEvent {
             event_type: EVENT_NVME_QUEUE,
-            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            timestamp,
             tgid,
             pid,
             inode: 0,
@@ -328,15 +474,6 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
         };
 
         EVENTS.output(&ctx, &event, 0);
-
-        //info!(
-        //    &ctx,
-        //    "nvme queue request: request ptr {:x}, tag {}, time {}",
-        //    req_ptr as u64,
-        //    tag,
-        //    time
-        //);
-
         Ok(0)
     }
 }
@@ -351,21 +488,13 @@ pub fn dev_nvme_complete_batch_req(ctx: ProbeContext) -> u32 {
 
 fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
-        //        let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
+        
         let tgid: u32 = ctx.tgid();
-        // if !check_tgid(tgid) {
-        //     return Ok(0);
-        // }
-
         let pid: u32 = ctx.pid();
+
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let req_ptr: *const request = ctx.arg(0).ok_or(ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
-
-        //let bio_ptr: *const bio =
-        //    read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
-        //
-        //let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-        //let (maj, min) = dev_to_maj_min(bd_dev);
 
         //        if !check_device(maj, min) {
         //            return Ok(0);
@@ -373,7 +502,7 @@ fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
 
         let event = IoEvent {
             event_type: EVENT_NVME_COMPLETE,
-            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            timestamp,
             tgid,
             pid,
             inode: 0,
@@ -403,15 +532,16 @@ fn try_fs_btree_writepages(ctx: ProbeContext) -> Result<u32, u32> {
         if !check_tgid(tgid) {
             return Ok(0);
         }
-
         let pid: u32 = ctx.pid();
+
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let mapping_ptr: *const address_space = ctx.arg(0).ok_or(ERR_CODE)?;
         let inode_ptr: *const inode =
             read_ptr_field!(mapping_ptr, address_space, host, inode).map_err(|_| ERR_CODE)?;
 
         let event = IoEvent {
             event_type: EVENT_BTREE_WRITEPAGES,
-            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            timestamp,
             tgid,
             pid,
             inode: inode_ptr as u64,
@@ -442,16 +572,17 @@ fn try_fs_btrfs_writepages(ctx: ProbeContext) -> Result<u32, u32> {
         if !check_tgid(tgid) {
             return Ok(0);
         }
-
+    
         let pid: u32 = ctx.pid();
 
+        let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
         let mapping_ptr: *const address_space = ctx.arg(0).ok_or(ERR_CODE)?;
         let inode_ptr: *const inode =
             read_ptr_field!(mapping_ptr, address_space, host, inode).map_err(|_| ERR_CODE)?;
 
         let event = IoEvent {
             event_type: EVENT_BTRFS_WRITEPAGES,
-            timestamp: helpers::r#gen::bpf_ktime_get_ns(),
+            timestamp,
             tgid,
             pid,
             inode: inode_ptr as u64,
