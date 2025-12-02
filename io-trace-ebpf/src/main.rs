@@ -38,19 +38,19 @@ pub struct IoEvent {
 }
 
 // 이벤트 타입 상수
-const EVENT_BTREE_WRITEPAGES:       u32 = 0;
-const EVENT_BTRFS_WRITEPAGES:       u32 = 1;
-const EVENT_BIO_SUBMIT:             u32 = 2;
-const EVENT_BIO_COMPLETE:           u32 = 3;
-const EVENT_NVME_QUEUE:             u32 = 4;
-const EVENT_NVME_COMPLETE_BATCH:    u32 = 5;
-const EVENT_NVME_COMPLETE:          u32 = 6;
-const EVENT_BLK_MQ_START_REQUEST:   u32 = 7;
-const EVENT_VFS_WRITE:              u32 = 8;
-const EVENT_VFS_WRITEV:             u32 = 9;
-const EVENT_BTRFS_DO_WRITE_ITER:    u32 = 10;
-const EVENT_COPY_ONE_RANGE:         u32 = 11;
-const EVENT_COPY_ONE_RANGE_RET:     u32 = 12;
+const EVENT_BTREE_WRITEPAGES:         u32 = 0;
+const EVENT_BTRFS_WRITEPAGES:         u32 = 1;
+const EVENT_BIO_SUBMIT:               u32 = 2;
+const EVENT_BIO_COMPLETE:             u32 = 3;
+const EVENT_NVME_QUEUE:               u32 = 4;
+const EVENT_NVME_COMPLETE_BATCH:      u32 = 5;
+const EVENT_NVME_COMPLETE:            u32 = 6;
+const EVENT_BLK_MQ_START_REQUEST:     u32 = 7;
+const EVENT_VFS_WRITE:                u32 = 8;
+const EVENT_VFS_WRITEV:               u32 = 9;
+const EVENT_BTRFS_DO_WRITE_ITER:      u32 = 10;
+const EVENT_BTRFS_BUFFERED_WRITE:     u32 = 11;
+const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
 
 #[map]
 static EVENTS: aya_ebpf::maps::PerfEventArray<IoEvent> = aya_ebpf::maps::PerfEventArray::new(0);
@@ -68,7 +68,7 @@ const ERR_CODE: u32 = 1;
 const DEV_MAJ: u32 = 259;
 const DEV_MIN: u32 = 5;
 
-const TARGET_TGID: u32 = 1624107;
+const TARGET_TGID: u32 = 2131849;
 
 fn check_device(maj: u32, min: u32) -> bool {
     if maj == DEV_MAJ && min == DEV_MIN {
@@ -126,13 +126,13 @@ fn bio_get_start_sector(bio_ptr: *const bio) -> Result<u64, u32> {
 }
 
 #[kprobe]
-pub fn fs_copy_one_range(ctx: ProbeContext) -> u32 {
-    match try_fs_copy_one_range(ctx) {
+pub fn fs_btrfs_buffered_write(ctx: ProbeContext) -> u32 {
+    match try_fs_btrfs_buffered_write(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
-fn try_fs_copy_one_range(ctx: ProbeContext) -> Result<u32, u32> {
+fn try_fs_btrfs_buffered_write(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
         if !check_tgid(tgid) {
@@ -143,7 +143,7 @@ fn try_fs_copy_one_range(ctx: ProbeContext) -> Result<u32, u32> {
         let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         let event = IoEvent {
-            event_type: EVENT_COPY_ONE_RANGE,
+            event_type: EVENT_BTRFS_BUFFERED_WRITE,
             timestamp,
             tgid,
             pid,
@@ -163,13 +163,13 @@ fn try_fs_copy_one_range(ctx: ProbeContext) -> Result<u32, u32> {
 }
 
 #[kretprobe]
-pub fn fs_copy_one_range_ret(ctx: RetProbeContext) -> u32 {
-    match try_fs_copy_one_range_ret(ctx) {
+pub fn fs_btrfs_buffered_write_ret(ctx: RetProbeContext) -> u32 {
+    match try_fs_btrfs_buffered_write_ret(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
-fn try_fs_copy_one_range_ret(ctx: RetProbeContext) -> Result<u32, u32> {
+fn try_fs_btrfs_buffered_write_ret(ctx: RetProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
         if !check_tgid(tgid) {
@@ -180,7 +180,7 @@ fn try_fs_copy_one_range_ret(ctx: RetProbeContext) -> Result<u32, u32> {
         let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
 
         let event = IoEvent {
-            event_type: EVENT_COPY_ONE_RANGE_RET,
+            event_type: EVENT_BTRFS_BUFFERED_WRITE_RET,
             timestamp,
             tgid,
             pid,

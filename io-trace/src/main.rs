@@ -27,21 +27,21 @@ struct IoEvent {
 }
 
 // 이벤트 타입
-const EVENT_BTREE_WRITEPAGES:      u32 = 0;
-const EVENT_BTRFS_WRITEPAGES:      u32 = 1;
-const EVENT_BIO_SUBMIT:            u32 = 2;
-const EVENT_BIO_COMPLETE:          u32 = 3;
-const EVENT_NVME_QUEUE:            u32 = 4;
-const EVENT_NVME_COMPLETE_BATCH:   u32 = 5;
-const EVENT_NVME_COMPLETE:         u32 = 6;
-const EVENT_BLK_MQ_START_REQUEST:  u32 = 7;
-const EVENT_VFS_WRITE:             u32 = 8;
-const EVENT_VFS_WRITEV:            u32 = 9;
-const EVENT_BTRFS_DO_WRITE_ITER:   u32 = 10;
-const EVENT_COPY_ONE_RANGE:        u32 = 11;
-const EVENT_COPY_ONE_RANGE_RET:    u32 = 12;
+const EVENT_BTREE_WRITEPAGES:         u32 = 0;
+const EVENT_BTRFS_WRITEPAGES:         u32 = 1;
+const EVENT_BIO_SUBMIT:               u32 = 2;
+const EVENT_BIO_COMPLETE:             u32 = 3;
+const EVENT_NVME_QUEUE:               u32 = 4;
+const EVENT_NVME_COMPLETE_BATCH:      u32 = 5;
+const EVENT_NVME_COMPLETE:            u32 = 6;
+const EVENT_BLK_MQ_START_REQUEST:     u32 = 7;
+const EVENT_VFS_WRITE:                u32 = 8;
+const EVENT_VFS_WRITEV:               u32 = 9;
+const EVENT_BTRFS_DO_WRITE_ITER:      u32 = 10;
+const EVENT_BTRFS_BUFFERED_WRITE:     u32 = 11;
+const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
 
-const TARGET_TGID: u32 = 1624107;
+const TARGET_TGID: u32 = 2131849;
 
 struct IoTracker {
     vfs_requests: u64,
@@ -279,9 +279,9 @@ impl IoTracker {
                 self.stats.vfs_to_fs_latency.push(event.timestamp - self.vfs_requests);
             }
             
-            EVENT_COPY_ONE_RANGE => {
+            EVENT_BTRFS_BUFFERED_WRITE => {
                 println!(
-                        "[{:>12}] copy_one_range: tgid: {}",
+                        "[{:>12}] btrfs_buffered_write: tgid: {}",
                         event.timestamp,
                         event.tgid,
                     );
@@ -289,9 +289,9 @@ impl IoTracker {
                 self.cache_requests = event.timestamp;
             }
             
-            EVENT_COPY_ONE_RANGE_RET => {
+            EVENT_BTRFS_BUFFERED_WRITE_RET => {
                 println!(
-                        "[{:>12}] copy_one_range return: tgid: {}",
+                        "[{:>12}] btrfs_buffered_write return: tgid: {}",
                         event.timestamp,
                         event.tgid
                     );
@@ -430,19 +430,19 @@ async fn main() -> anyhow::Result<()> {
     program_bio_blk_mq_start_request.load()?;
     program_bio_blk_mq_start_request.attach("blk_mq_start_request", 0)?;
 
-    let program_fs_copy_one_range: &mut KProbe = ebpf
-        .program_mut("fs_copy_one_range")
+    let program_fs_btrfs_buffered_write: &mut KProbe = ebpf
+        .program_mut("fs_btrfs_buffered_write")
         .unwrap()
         .try_into()?;
-    program_fs_copy_one_range.load()?;  
-    program_fs_copy_one_range.attach("copy_one_range", 0)?;
+    program_fs_btrfs_buffered_write.load()?;  
+    program_fs_btrfs_buffered_write.attach("btrfs_buffered_write", 0)?;
 
-    let program_fs_copy_one_range_ret: &mut KProbe = ebpf
-        .program_mut("fs_copy_one_range_ret")
+    let program_fs_btrfs_buffered_write_ret: &mut KProbe = ebpf
+        .program_mut("fs_btrfs_buffered_write_ret")
         .unwrap()
         .try_into()?;
-    program_fs_copy_one_range_ret.load()?;  
-    program_fs_copy_one_range_ret.attach("copy_one_range", 0)?;
+    program_fs_btrfs_buffered_write_ret.load()?;  
+    program_fs_btrfs_buffered_write_ret.attach("btrfs_buffered_write", 0)?;
 
 
     // Load user-space tracker
@@ -467,6 +467,8 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    println!("All probes attached, starting tracing with TGID: {}", TARGET_TGID);
+    
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
     ctrl_c.await?;
