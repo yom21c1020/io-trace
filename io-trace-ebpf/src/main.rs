@@ -55,6 +55,9 @@ const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
 #[map]
 static EVENTS: aya_ebpf::maps::PerfEventArray<IoEvent> = aya_ebpf::maps::PerfEventArray::new(0);
 
+#[map]
+static TARGET_PID_MAP: aya_ebpf::maps::Array<u32> = aya_ebpf::maps::Array::with_max_entries(1, 0);
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct RequestKey {
@@ -68,8 +71,6 @@ const ERR_CODE: u32 = 1;
 const DEV_MAJ: u32 = 259;
 const DEV_MIN: u32 = 5;
 
-const TARGET_TGID: u32 = 2131849;
-
 fn check_device(maj: u32, min: u32) -> bool {
     if maj == DEV_MAJ && min == DEV_MIN {
         return true;
@@ -79,7 +80,13 @@ fn check_device(maj: u32, min: u32) -> bool {
 }
 
 fn check_tgid(tgid: u32) -> bool {
-    tgid == TARGET_TGID
+    unsafe {
+        if let Some(target_tgid) = TARGET_PID_MAP.get(0) {
+            return tgid == *target_tgid;
+        }
+        // Map이 비어있으면 추적하지 않음
+        false
+    }
 }
 
 fn dev_to_maj_min(dev: u32) -> (u32, u32) {

@@ -3,6 +3,7 @@ use aya::programs::KProbe;
 use log::{debug, warn};
 use tokio::signal;
 use std::collections::HashMap;
+use clap::Parser;
 use aya::maps::perf::AsyncPerfEventArray;
 use aya::util::online_cpus;
 use bytes::BytesMut;
@@ -41,7 +42,12 @@ const EVENT_BTRFS_DO_WRITE_ITER:      u32 = 10;
 const EVENT_BTRFS_BUFFERED_WRITE:     u32 = 11;
 const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
 
-const TARGET_TGID: u32 = 2131849;
+#[derive(Parser)]
+struct Args {
+    /// Target process ID (TGID) to trace
+    #[arg(short = 'p', long = "pid")]
+    pid: u32,
+}
 
 struct IoTracker {
     vfs_requests: u64,
@@ -165,14 +171,12 @@ impl IoTracker {
             }
 
             EVENT_BLK_MQ_START_REQUEST => {
-                if event.tgid == TARGET_TGID {
-                    self.nvme_req_tgid.insert(event.tag, (event.dev, event.sector, event.request_ptr));
-                    
-                    println!(
-                        "[{:>12}] blk_mq start: tgid: {}, ptr: {:#x}, tag: {}",
-                        event.timestamp, event.tgid, event.request_ptr, event.tag
-                    );
-                }
+                self.nvme_req_tgid.insert(event.tag, (event.dev, event.sector, event.request_ptr));
+
+                println!(
+                    "[{:>12}] blk_mq start: tgid: {}, ptr: {:#x}, tag: {}",
+                    event.timestamp, event.tgid, event.request_ptr, event.tag
+                );
             }
 
             EVENT_NVME_QUEUE => {
@@ -348,6 +352,10 @@ impl IoTracker {
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
+    // CLI 인자 파싱
+    let args = Args::parse();
+    let target_pid = args.pid;
+
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
     let rlim = libc::rlimit {
@@ -441,9 +449,13 @@ async fn main() -> anyhow::Result<()> {
         .program_mut("fs_btrfs_buffered_write_ret")
         .unwrap()
         .try_into()?;
-    program_fs_btrfs_buffered_write_ret.load()?;  
+    program_fs_btrfs_buffered_write_ret.load()?;
     program_fs_btrfs_buffered_write_ret.attach("btrfs_buffered_write", 0)?;
 
+    // Target PID를 eBPF Map에 설정
+    let mut pid_map: aya::maps::Array<_, u32> =
+        aya::maps::Array::try_from(ebpf.map_mut("TARGET_PID_MAP").unwrap())?;
+    pid_map.set(0, target_pid, 0)?;
 
     // Load user-space tracker
     let mut perf_array = AsyncPerfEventArray::try_from(ebpf.take_map("EVENTS").unwrap())?;
@@ -467,7 +479,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    println!("All probes attached, starting tracing with TGID: {}", TARGET_TGID);
+    println!("All probes attached, starting tracing with TGID: {}", target_pid);
     
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
