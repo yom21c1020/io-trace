@@ -65,36 +65,19 @@ impl IoTracker {
 
     fn handle_event(&mut self, event: IoEvent) {
         match event.event_type {
-            EVENT_BTREE_WRITEPAGES => {
-                self.btree_requests
-                    .insert(event.tgid, (event.inode, event.timestamp));
-                println!(
-                    "[{:>12}] btrfs Layer  : btree_writepages started - tgid: {}, inode: {}",
-                    event.timestamp, event.tgid, event.inode
-                );
-            }
-
-            EVENT_BTRFS_WRITEPAGES => {
-                self.btrfs_requests
-                    .insert(event.tgid, (event.inode, event.timestamp));
-                println!(
-                    "[{:>12}] btrfs Layer  : writepages started - tgid: {}, inode: {}",
-                    event.timestamp, event.tgid, event.inode
-                );
-            }
-
             EVENT_BIO_SUBMIT => {
                 // FS -> BIO 레이턴시 계산
                 if let Some((inode, fs_time)) = self.btrfs_requests.get(&event.tgid) {
                     let fs_to_bio = event.timestamp - fs_time;
                     self.stats.fs_to_bio_latency.push(fs_to_bio);
+                    let (maj, min) = dev_to_maj_min(event.dev);
                     println!(
                         "[{:>12}] FS->BIO   : tgid: {}, inode: {}, dev: ({},{}), sector: {}, latency: {} ns",
                         event.timestamp,
                         event.tgid,
                         "-",
-                        event.dev >> 20,
-                        event.dev & ((1 << 20) - 1),
+                        maj,
+                        min,
                         event.sector,
                         fs_to_bio
                     );
@@ -106,13 +89,14 @@ impl IoTracker {
                 );
 
                 self.bio_requests_ptr.insert(event.request_ptr, event.timestamp);
+                let (maj, min) = dev_to_maj_min(event.dev);
 
                 println!(
                     "[{:>12}] BIO Submit: tgid: {}, dev: ({},{}), sector: {}, size: {}",
                     event.timestamp,
                     event.tgid,
-                    event.dev >> 20,
-                    event.dev & ((1 << 20) - 1),
+                    maj,
+                    min,
                     event.sector,
                     event.size
                 );
@@ -123,13 +107,13 @@ impl IoTracker {
                 {
                     let bio_latency = event.timestamp - submit_time;
                     self.stats.bio_latency.push(bio_latency);
-
+                    let (maj, min) = dev_to_maj_min(event.dev);
                     println!(
                         "[{:>12}] BIO Complete: tgid: {}, dev: ({},{}), sector: {}, latency: {} ns",
                         event.timestamp,
                         event.tgid,
-                        event.dev >> 20,
-                        event.dev & ((1 << 20) - 1),
+                        maj,
+                        min,
                         event.sector,
                         bio_latency
                     );
@@ -160,7 +144,7 @@ impl IoTracker {
                         event.request_ptr,
                         (event.timestamp, dev, sector),
                     );
-                
+                let (maj, min) = dev_to_maj_min(dev);
                     println!(
                         "[{:>12}] NVMe Queue: request_ptr: {:#x}, blk_request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}, latency: {}",
                         event.timestamp,
@@ -168,8 +152,8 @@ impl IoTracker {
                         blk_req_ptr,
                         event.tag,
                         event.tgid,
-                        dev >> 20,
-                        dev & ((1 << 20) - 1),
+                        maj,
+                        min,
                         sector,
                         latency
                     );
@@ -196,13 +180,13 @@ impl IoTracker {
                 {
                     let nvme_latency = event.timestamp - queue_time;
                     self.stats.nvme_latency.push(nvme_latency);
-
+                    let (maj, min) = dev_to_maj_min(dev);
                     println!(
                         "[{:>12}] NVMe Complete(batch): request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
                         event.timestamp,
                         event.request_ptr,
-                        dev >> 20,
-                        dev & ((1 << 20) - 1),
+                        maj,
+                        min,
                         sector,
                         nvme_latency
                     );
@@ -214,13 +198,14 @@ impl IoTracker {
                 {
                     let nvme_latency = event.timestamp - queue_time;
                     self.stats.nvme_latency.push(nvme_latency);
+                    let (maj, min) = dev_to_maj_min(dev);
 
                     println!(
                         "[{:>12}] NVMe Complete       : request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
                         event.timestamp,
                         event.request_ptr,
-                        dev >> 20,
-                        dev & ((1 << 20) - 1),
+                        maj,
+                        min,
                         sector,
                         nvme_latency
                     );
@@ -228,47 +213,24 @@ impl IoTracker {
             }
             
             EVENT_VFS_WRITE => {
+                let (maj, min) = dev_to_maj_min(event.dev);
                 println!(
                         "[{:>12}] vfs_write: tgid: {}, dev: ({}, {}), inode: {}",
                         event.timestamp,
                         event.tgid,
-                        (event.dev) >> 20,
-                        (event.dev) & ((1 << 20) - 1),
+                        maj,
+                        min,
                         event.inode
                     );
                 self.vfs_requests = event.timestamp;
             }
-
-            EVENT_BTRFS_DO_WRITE_ITER => {
-                println!(
-                        "[{:>12}] btrfs_do_write_iter: tgid: {}, dev: ({}, {}), inode: {}",
-                        event.timestamp,
-                        event.tgid,
-                        (event.dev) >> 20,
-                        (event.dev) & ((1 << 20) - 1),
-                        event.inode
-
-                    );
-                self.stats.vfs_to_fs_latency.push(event.timestamp - self.vfs_requests);
-            }
             
-            EVENT_BTRFS_BUFFERED_WRITE => {
+            EVENT_FS_NEW_SYNC_WRITE => {
                 println!(
-                        "[{:>12}] btrfs_buffered_write: tgid: {}",
-                        event.timestamp,
-                        event.tgid,
-                    );
-
-                self.cache_requests = event.timestamp;
-            }
-            
-            EVENT_BTRFS_BUFFERED_WRITE_RET => {
-                println!(
-                        "[{:>12}] btrfs_buffered_write return: tgid: {}",
+                        "[{:>12}] new_sync_write: tgid: {}",
                         event.timestamp,
                         event.tgid
                     );
-                self.stats.fs_page_cache_latency.push(event.timestamp - self.cache_requests);
             }
 
             _ => {}
@@ -335,8 +297,9 @@ async fn main() -> anyhow::Result<()> {
 
     // eBPF Probe Initialization
     attach_kprobe(&mut ebpf, "vfs_vfs_write", "vfs_write");
-
-    attach_kprobe(&mut ebpf, "fs_btrfs_do_write_iter", "btrfs_do_write_iter");
+    if let Err(e) = attach_kprobe(&mut ebpf, "fs_new_sync_write", "new_sync_write") {
+        warn!("Failed to init: new_sync_write");
+    }
     
     attach_kprobe(&mut ebpf, "bio_submit_bio", "submit_bio");
     attach_kprobe(&mut ebpf, "bio_bio_endio", "bio_endio");
@@ -344,13 +307,8 @@ async fn main() -> anyhow::Result<()> {
     attach_kprobe(&mut ebpf, "dev_nvme_queue_rq", "nvme_queue_rq");
     attach_kprobe(&mut ebpf, "dev_nvme_complete_batch_req", "nvme_complete_batch_req");
     attach_kprobe(&mut ebpf, "dev_nvme_complete_rq", "nvme_complete_rq");
-    
-    attach_kprobe(&mut ebpf, "fs_btree_writepages", "btree_writepages");
-    attach_kprobe(&mut ebpf, "fs_btrfs_writepages", "btrfs_writepages");
-    
+        
     attach_kprobe(&mut ebpf, "bio_blk_mq_start_request", "blk_mq_start_request");
-    attach_kprobe(&mut ebpf, "fs_btrfs_buffered_write", "btrfs_buffered_write");
-    attach_kprobe(&mut ebpf, "fs_btrfs_buffered_write_ret", "btrfs_buffered_write");
 
     // Target PID를 eBPF Map에 설정
     let mut pid_map: aya::maps::Array<_, u32> =

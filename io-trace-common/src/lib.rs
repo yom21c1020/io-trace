@@ -32,3 +32,10 @@ pub const EVENT_VFS_WRITEV:               u32 = 9;
 pub const EVENT_BTRFS_DO_WRITE_ITER:      u32 = 10;
 pub const EVENT_BTRFS_BUFFERED_WRITE:     u32 = 11;
 pub const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
+pub const EVENT_FS_NEW_SYNC_WRITE:        u32 = 13;
+
+pub fn dev_to_maj_min(dev: u32) -> (u32, u32) {
+    let maj: u32 = dev >> 20;
+    let min: u32 = dev & ((1 << 20) - 1);
+    (maj, min)
+}
