@@ -17,40 +17,7 @@ use vmlinux::{address_space, bio, blk_mq_queue_data, block_device, bvec_iter, in
 use crate::nvme::{blk_mq_hw_ctx, request_queue};
 use crate::vmlinux::dev_t;
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct IoEvent {
-    pub event_type: u32,
-    pub timestamp: u64,
-    pub tgid: u32,
-    pub pid: u32,
-
-    // 레이어별 식별자
-    pub dev: u32,
-    pub sector: u64,
-    pub inode: u64,
-    pub request_ptr: u64,
-    pub tag: i32,
-
-    // 추가 컨텍스트
-    pub size: u32,  // I/O 크기
-    pub flags: u32, // READ/WRITE 등
-}
-
-// 이벤트 타입 상수
-const EVENT_BTREE_WRITEPAGES:         u32 = 0;
-const EVENT_BTRFS_WRITEPAGES:         u32 = 1;
-const EVENT_BIO_SUBMIT:               u32 = 2;
-const EVENT_BIO_COMPLETE:             u32 = 3;
-const EVENT_NVME_QUEUE:               u32 = 4;
-const EVENT_NVME_COMPLETE_BATCH:      u32 = 5;
-const EVENT_NVME_COMPLETE:            u32 = 6;
-const EVENT_BLK_MQ_START_REQUEST:     u32 = 7;
-const EVENT_VFS_WRITE:                u32 = 8;
-const EVENT_VFS_WRITEV:               u32 = 9;
-const EVENT_BTRFS_DO_WRITE_ITER:      u32 = 10;
-const EVENT_BTRFS_BUFFERED_WRITE:     u32 = 11;
-const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
+use io_trace_common::*;
 
 #[map]
 static EVENTS: aya_ebpf::maps::PerfEventArray<IoEvent> = aya_ebpf::maps::PerfEventArray::new(0);
@@ -409,14 +376,14 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
 
         let bio_ptr: *const bio =
             read_ptr_field!(req_ptr, request, bio, bio).map_err(|_| ERR_CODE)?;
-        let bd_dev: u32 = 0;
-        let bi_sector: u64 = 0;
+        let mut bd_dev: u32 = 0;
+        let mut bi_sector: u64 = 0;
         
-        let maj: u32 = 0;
-        let min: u32 = 0;
+        let mut maj: u32 = 0;
+        let mut min: u32 = 0;
         if bio_ptr != core::ptr::null() {
-            let (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
-            let (maj, min) = dev_to_maj_min(bd_dev); 
+            (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
+            (maj, min) = dev_to_maj_min(bd_dev); 
         } // try to read device number & sector
 
         let event = IoEvent {

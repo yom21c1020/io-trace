@@ -9,38 +9,7 @@ use aya::util::online_cpus;
 use bytes::BytesMut;
 use std::sync::{Arc, Mutex};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct IoEvent {
-    event_type: u32,
-    timestamp: u64,
-    tgid: u32,
-    pid: u32,
-
-    dev: u32,
-    sector: u64,
-    inode: u64,
-    request_ptr: u64,
-    tag: i32,
-
-    size: u32,
-    flags: u32,
-}
-
-// 이벤트 타입
-const EVENT_BTREE_WRITEPAGES:         u32 = 0;
-const EVENT_BTRFS_WRITEPAGES:         u32 = 1;
-const EVENT_BIO_SUBMIT:               u32 = 2;
-const EVENT_BIO_COMPLETE:             u32 = 3;
-const EVENT_NVME_QUEUE:               u32 = 4;
-const EVENT_NVME_COMPLETE_BATCH:      u32 = 5;
-const EVENT_NVME_COMPLETE:            u32 = 6;
-const EVENT_BLK_MQ_START_REQUEST:     u32 = 7;
-const EVENT_VFS_WRITE:                u32 = 8;
-const EVENT_VFS_WRITEV:               u32 = 9;
-const EVENT_BTRFS_DO_WRITE_ITER:      u32 = 10;
-const EVENT_BTRFS_BUFFERED_WRITE:     u32 = 11;
-const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
+use io_trace_common::*;
 
 #[derive(Parser)]
 struct Args {
@@ -306,46 +275,30 @@ impl IoTracker {
         }
     }
 
-    fn print_stats(&self) {
-        println!("\n=== I/O Statistics ===");
-
-        if !self.stats.vfs_to_fs_latency.is_empty() {
-            let avg: u64 = self.stats.vfs_to_fs_latency.iter().sum::<u64>()
-                / self.stats.vfs_to_fs_latency.len() as u64;
-            println!("VFS->FS avg latency: {} ns", avg);
-        }
-
-        if !self.stats.fs_page_cache_latency.is_empty() {
-            let avg: u64 = self.stats.fs_page_cache_latency.iter().sum::<u64>()
-                / self.stats.fs_page_cache_latency.len() as u64;
-            println!("Page Cache avg latency: {} ns", avg);
-        }
-
-
-        if !self.stats.fs_to_bio_latency.is_empty() {
-            let avg: u64 = self.stats.fs_to_bio_latency.iter().sum::<u64>()
-                / self.stats.fs_to_bio_latency.len() as u64;
-            println!("FS->BIO avg latency: {} ns", avg);
-        }
-
-        if !self.stats.bio_latency.is_empty() {
-            let avg: u64 =
-                self.stats.bio_latency.iter().sum::<u64>() / self.stats.bio_latency.len() as u64;
-            println!("BIO avg latency: {} ns", avg);
-        }
-
-        if !self.stats.bio_to_nvme_latency.is_empty() {
-            let avg: u64 =
-                self.stats.bio_to_nvme_latency.iter().sum::<u64>() / self.stats.bio_to_nvme_latency.len() as u64;
-            println!("BIO->NVMe avg latency: {} ns", avg);
-        }
-
-        if !self.stats.nvme_latency.is_empty() {
-            let avg: u64 =
-                self.stats.nvme_latency.iter().sum::<u64>() / self.stats.nvme_latency.len() as u64;
-            println!("NVMe avg latency: {} ns", avg);
+    fn print_avg(name: &str, data: &[u64]) {
+        if !data.is_empty() {
+            let avg = data.iter().sum::<u64>() / data.len() as u64;
+            println!("{name} avg latency: {avg} ns");
         }
     }
+
+    fn print_stats(&self) {
+        println!("\n=== I/O Statistics ===");
+        
+        Self::print_avg("VFS->FS", &self.stats.vfs_to_fs_latency);
+        Self::print_avg("Page Cache", &self.stats.fs_page_cache_latency);
+        Self::print_avg("FS->BIO", &self.stats.fs_to_bio_latency);
+        Self::print_avg("BIO", &self.stats.bio_latency);
+        Self::print_avg("BIO->NVMe", &self.stats.bio_to_nvme_latency);
+        Self::print_avg("NVMe", &self.stats.nvme_latency);
+    }
+}
+
+fn attach_kprobe(ebpf: &mut aya::Ebpf, prog: &str, fn_name: &str) -> anyhow::Result<()> {
+    let program: &mut KProbe = ebpf.program_mut(prog).unwrap().try_into()?;
+    program.load()?;
+    program.attach(fn_name, 0)?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -379,78 +332,25 @@ async fn main() -> anyhow::Result<()> {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {e}");
     }
+
     // eBPF Probe Initialization
-    let program_vfs_vfs_write: &mut KProbe = ebpf.program_mut("vfs_vfs_write").unwrap().try_into()?;
-    program_vfs_vfs_write.load()?;
-    program_vfs_vfs_write.attach("vfs_write", 0)?;
+    attach_kprobe(&mut ebpf, "vfs_vfs_write", "vfs_write");
 
-    let program_fs_btrfs_do_write_iter: &mut KProbe = ebpf.program_mut("fs_btrfs_do_write_iter").unwrap().try_into()?;
-    program_fs_btrfs_do_write_iter.load()?;
-    program_fs_btrfs_do_write_iter.attach("btrfs_do_write_iter", 0)?;
-
-    let program_bio_submit_bio: &mut KProbe =
-        ebpf.program_mut("bio_submit_bio").unwrap().try_into()?;
-    program_bio_submit_bio.load()?;
-    program_bio_submit_bio.attach("submit_bio", 0)?;
-
-    let program_bio_bio_endio: &mut KProbe =
-        ebpf.program_mut("bio_bio_endio").unwrap().try_into()?;
-    program_bio_bio_endio.load()?;
-    program_bio_bio_endio.attach("bio_endio", 0)?;
-
-    let program_dev_nvme_queue_rq: &mut KProbe =
-        ebpf.program_mut("dev_nvme_queue_rq").unwrap().try_into()?;
-    program_dev_nvme_queue_rq.load()?;
-    program_dev_nvme_queue_rq.attach("nvme_queue_rq", 0)?;
-
-    let program_dev_nvme_complete_batch_req: &mut KProbe = ebpf
-        .program_mut("dev_nvme_complete_batch_req")
-        .unwrap()
-        .try_into()?;
-    program_dev_nvme_complete_batch_req.load()?;
-    program_dev_nvme_complete_batch_req.attach("nvme_complete_batch_req", 0)?;
-
-    let program_dev_nvme_complete_rq: &mut KProbe = ebpf
-        .program_mut("dev_nvme_complete_rq")
-        .unwrap()
-        .try_into()?;
-    program_dev_nvme_complete_rq.load()?;
-    program_dev_nvme_complete_rq.attach("nvme_complete_rq", 0)?;
-
-    let program_fs_btree_writepages: &mut KProbe = ebpf
-        .program_mut("fs_btree_writepages")
-        .unwrap()
-        .try_into()?;
-    program_fs_btree_writepages.load()?;
-    program_fs_btree_writepages.attach("btree_writepages", 0)?;
-
-    let program_fs_btrfs_writepages: &mut KProbe = ebpf
-        .program_mut("fs_btrfs_writepages")
-        .unwrap()
-        .try_into()?;
-    program_fs_btrfs_writepages.load()?;
-    program_fs_btrfs_writepages.attach("btrfs_writepages", 0)?;
-
-    let program_bio_blk_mq_start_request: &mut KProbe = ebpf
-        .program_mut("bio_blk_mq_start_request")
-        .unwrap()
-        .try_into()?;
-    program_bio_blk_mq_start_request.load()?;
-    program_bio_blk_mq_start_request.attach("blk_mq_start_request", 0)?;
-
-    let program_fs_btrfs_buffered_write: &mut KProbe = ebpf
-        .program_mut("fs_btrfs_buffered_write")
-        .unwrap()
-        .try_into()?;
-    program_fs_btrfs_buffered_write.load()?;  
-    program_fs_btrfs_buffered_write.attach("btrfs_buffered_write", 0)?;
-
-    let program_fs_btrfs_buffered_write_ret: &mut KProbe = ebpf
-        .program_mut("fs_btrfs_buffered_write_ret")
-        .unwrap()
-        .try_into()?;
-    program_fs_btrfs_buffered_write_ret.load()?;
-    program_fs_btrfs_buffered_write_ret.attach("btrfs_buffered_write", 0)?;
+    attach_kprobe(&mut ebpf, "fs_btrfs_do_write_iter", "btrfs_do_write_iter");
+    
+    attach_kprobe(&mut ebpf, "bio_submit_bio", "submit_bio");
+    attach_kprobe(&mut ebpf, "bio_bio_endio", "bio_endio");
+    
+    attach_kprobe(&mut ebpf, "dev_nvme_queue_rq", "nvme_queue_rq");
+    attach_kprobe(&mut ebpf, "dev_nvme_complete_batch_req", "nvme_complete_batch_req");
+    attach_kprobe(&mut ebpf, "dev_nvme_complete_rq", "nvme_complete_rq");
+    
+    attach_kprobe(&mut ebpf, "fs_btree_writepages", "btree_writepages");
+    attach_kprobe(&mut ebpf, "fs_btrfs_writepages", "btrfs_writepages");
+    
+    attach_kprobe(&mut ebpf, "bio_blk_mq_start_request", "blk_mq_start_request");
+    attach_kprobe(&mut ebpf, "fs_btrfs_buffered_write", "btrfs_buffered_write");
+    attach_kprobe(&mut ebpf, "fs_btrfs_buffered_write_ret", "btrfs_buffered_write");
 
     // Target PID를 eBPF Map에 설정
     let mut pid_map: aya::maps::Array<_, u32> =
