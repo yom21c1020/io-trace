@@ -1,4 +1,4 @@
-use aya::programs::KProbe;
+use aya::programs::{ KProbe, FExit };
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
@@ -19,162 +19,148 @@ struct Args {
 }
 
 struct IoTracker {
-    vfs_requests: u64,
-    cache_requests: u64,
-    // FS 레이어: tgid -> (inode, start_time)
-    btree_requests: HashMap<u32, (u64, u64)>,
-    btrfs_requests: HashMap<u32, (u64, u64)>,
+    // Page Cache: (tgid, pid) → timestamp
+    vfs_start: HashMap<(u32, u32), u64>,
 
-    // BIO 레이어: (tgid, dev, sector) -> (submit_time, request_ptr)
-    bio_requests: HashMap<(u32, u32, u64), (u64, u64)>,
-    bio_requests_ptr: HashMap<u64, u64>, // request_ptr -> time
+    // BIO: bio_ptr → (timestamp, dev, sector)
+    bio_submit: HashMap<u64, (u64, u32, u64)>,
+    
+    // BLK - NVMe match: request_ptr -> (timestamp, dev, sector, bio_ptr)
+    blk_nvme_req: HashMap<u64, (u64, u32, u64, u64)>,
 
-    // NVMe 레이어: request_ptr -> (queue_time, bio_info)
-    nvme_requests: HashMap<u64, (u64, u32, u64)>, // ptr -> (time, dev, sector)
-    nvme_req_tgid: HashMap<i32, (u32, u64, u64)>, // (ptr, tag) -> (dev, sector, ptr)
+    nvme_queue_req: HashMap<u64, (u64, u32, u64)>,
+    // NVMe: request_ptr → (timestamp, dev, sector)
+    // nvme_queue_rq에서 request_ptr로 저장, nvme_complete에서 request_ptr로 lookup
+    nvme_requests: HashMap<u64, (u64, u32, u64)>,
 
-    // 통계
     stats: IoStats,
 }
 
 #[derive(Default, Debug)]
 struct IoStats {
-    vfs_to_fs_latency: Vec<u64>,
-    fs_page_cache_latency: Vec<u64>,
-    fs_to_bio_latency: Vec<u64>,
-    bio_latency: Vec<u64>,
-    bio_to_nvme_latency: Vec<u64>,
-    nvme_latency: Vec<u64>,
-    total_latency: Vec<u64>,
+    vfs_latency: Vec<u64>,     // generic_perform_write → vfs_write ret
+    blk_request_latency: Vec<u64>,    // submit_bio → blk_mq_start_request
+    block_layer_latency: Vec<u64>,    // submit_bio → nvme_queue_rq
+    nvme_latency: Vec<u64>,           // nvme_queue_rq → nvme_complete
 }
 
 impl IoTracker {
     fn new() -> Self {
         Self {
-            vfs_requests: 0,
-            cache_requests: 0,
-            btree_requests: HashMap::new(),
-            btrfs_requests: HashMap::new(),
-            bio_requests: HashMap::new(),
-            bio_requests_ptr: HashMap::new(),
+            vfs_start: HashMap::new(),
+            bio_submit: HashMap::new(),
+            nvme_queue_req: HashMap::new(),
             nvme_requests: HashMap::new(),
-            nvme_req_tgid: HashMap::new(),
+            blk_nvme_req: HashMap::new(),
             stats: IoStats::default(),
         }
     }
 
     fn handle_event(&mut self, event: IoEvent) {
         match event.event_type {
-            EVENT_BIO_SUBMIT => {
-                // FS -> BIO 레이턴시 계산
-                if let Some((inode, fs_time)) = self.btrfs_requests.get(&event.tgid) {
-                    let fs_to_bio = event.timestamp - fs_time;
-                    self.stats.fs_to_bio_latency.push(fs_to_bio);
-                    let (maj, min) = dev_to_maj_min(event.dev);
-                    println!(
-                        "[{:>12}] FS->BIO   : tgid: {}, inode: {}, dev: ({},{}), sector: {}, latency: {} ns",
-                        event.timestamp,
-                        event.tgid,
-                        "-",
-                        maj,
-                        min,
-                        event.sector,
-                        fs_to_bio
-                    );
-                }
-
-                self.bio_requests.insert(
-                    (event.tgid, event.dev, event.sector),
-                    (event.timestamp, event.request_ptr),
-                );
-
-                self.bio_requests_ptr.insert(event.request_ptr, event.timestamp);
+            EventType::VfsWrite => {
+                self.vfs_start.insert((event.tgid, event.pid), event.timestamp);
                 let (maj, min) = dev_to_maj_min(event.dev);
-
                 println!(
-                    "[{:>12}] BIO Submit: tgid: {}, dev: ({},{}), sector: {}, size: {}",
-                    event.timestamp,
-                    event.tgid,
-                    maj,
-                    min,
-                    event.sector,
-                    event.size
+                    "[{:>12}] vfs_write: tgid: {}, dev: ({}, {}), inode: {}",
+                    event.timestamp, event.tgid, maj, min, event.inode
                 );
             }
 
-            EVENT_BIO_COMPLETE => {
-                if let Some((submit_time, _)) = self.bio_requests.remove(&(event.tgid, event.dev, event.sector))
-                {
-                    let bio_latency = event.timestamp - submit_time;
-                    self.stats.bio_latency.push(bio_latency);
+            EventType::GenericPerformWrite => {
+                if let Some(start_time) = self.vfs_start.remove(&(event.tgid, event.pid)) {
+                    let latency = event.timestamp - start_time;
+                    self.stats.vfs_latency.push(latency);
                     let (maj, min) = dev_to_maj_min(event.dev);
                     println!(
-                        "[{:>12}] BIO Complete: tgid: {}, dev: ({},{}), sector: {}, latency: {} ns",
-                        event.timestamp,
-                        event.tgid,
-                        maj,
-                        min,
-                        event.sector,
-                        bio_latency
+                        "[{:>12}] generic_perform_write: tgid: {}, pid: {}, dev: ({}, {}), inode: {}, latency {} ns",
+                        event.timestamp, event.tgid, event.pid, maj, min, event.inode, latency
                     );
-
-                    // FS 요청 정리
-                    self.btrfs_requests.remove(&event.tgid);
+                } else {
+                    println!(
+                        "[{:>12}] generic_perform_write: tgid: {}, pid: {}, inode: {} (no matching start)",
+                        event.timestamp, event.tgid, event.pid, event.inode
+                    );
                 }
             }
 
-            EVENT_BLK_MQ_START_REQUEST => {
-                self.nvme_req_tgid.insert(event.tag, (event.dev, event.sector, event.request_ptr));
-
+            EventType::VfsWriteRet => {
                 println!(
-                    "[{:>12}] blk_mq start: tgid: {}, ptr: {:#x}, tag: {}",
-                    event.timestamp, event.tgid, event.request_ptr, event.tag
+                    "[{:>12}] vfs_write_ret: tgid: {}, pid: {}",
+                    event.timestamp, event.tgid, event.pid
                 );
             }
 
-            EVENT_NVME_QUEUE => {
-                if let Some((dev, sector, blk_req_ptr)) = self.nvme_req_tgid.remove(&event.tag) {
-                    let mut latency: u64 = 0;
-                    if let Some(bio_time) = self.bio_requests_ptr.remove(&blk_req_ptr) {
-                        latency = event.timestamp - bio_time;
-                        self.stats.bio_to_nvme_latency.push(latency);
+            EventType::BioSubmit => {
+                let bio_ptr = event.request_ptr; // submit_bio stores bio ptr in request_ptr
+                self.bio_submit.insert(bio_ptr, (event.timestamp, event.dev, event.sector));
+                let (maj, min) = dev_to_maj_min(event.dev);
+                println!(
+                    "[{:>12}] BIO Submit: tgid: {}, dev: ({},{}), sector: {}, size: {}, bio_ptr: {:#x}",
+                    event.timestamp, event.tgid, maj, min, event.sector, event.size, bio_ptr
+                );
+            }
+
+            EventType::BioComplete => {
+                let (maj, min) = dev_to_maj_min(event.dev);
+                println!(
+                    "[{:>12}] BIO Complete: tgid: {}, dev: ({},{}), sector: {}",
+                    event.timestamp, event.tgid, maj, min, event.sector
+                );
+            }
+
+            EventType::BlkMqStartRequest => {
+                let bio_ptr = event.inode; // bio_ptr stored in inode field
+                // blk_request_latency: submit_bio → blk_mq_start_request
+                if bio_ptr != 0 {
+                    if let Some((submit_time, dev, sector)) = self.bio_submit.get(&bio_ptr) {
+                        let latency = event.timestamp - submit_time;
+                        self.stats.blk_request_latency.push(latency);
+                        let (maj, min) = dev_to_maj_min(*dev);
+                        self.blk_nvme_req.insert(event.request_ptr, (event.timestamp, *dev, *sector, bio_ptr));
+                        println!(
+                            "[{:>12}] blk_mq_start: tgid: {}, request_ptr: {:#x}, tag: {}, bio_ptr: {:#x}, blk_request_latency: {} ns, dev: ({},{}), sector: {}",
+                            event.timestamp, event.tgid, event.request_ptr, event.tag, bio_ptr, latency, maj, min, sector
+                        );
                     }
-
-                    self.nvme_requests.insert(
-                        event.request_ptr,
-                        (event.timestamp, dev, sector),
-                    );
-                let (maj, min) = dev_to_maj_min(dev);
-                    println!(
-                        "[{:>12}] NVMe Queue: request_ptr: {:#x}, blk_request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}, latency: {}",
-                        event.timestamp,
-                        event.request_ptr,
-                        blk_req_ptr,
-                        event.tag,
-                        event.tgid,
-                        maj,
-                        min,
-                        sector,
-                        latency
-                    );
-                } 
-                //else {
-                //    self.nvme_requests.insert(
-                //        event.request_ptr,
-                //        (event.timestamp, event.dev, event.sector),
-                //    );
-                //
-                //    println!(
-                //        "[{:>12}] NO MATCH// NVMe Queue: request_ptr: {:#x}, tag: {}, tgid: {}",
-                //        event.timestamp,
-                //        event.request_ptr,
-                //        event.tag,
-                //        event.tgid
-                //    );
-                //} // debug purpose
+                }
             }
 
-            EVENT_NVME_COMPLETE_BATCH => {
+            EventType::NvmeQueue => {
+                // tag로 blk_mq_start_request와 매칭
+                if let Some((submit_time, dev, sector, bio_ptr)) = self.blk_nvme_req.remove(&event.request_ptr) {
+                    // block_layer_latency: submit_bio → nvme_queue_rq (bio_ptr로 매칭)
+                    let mut block_latency: u64 = 0;
+                    if bio_ptr != 0 {
+                        if let Some((submit_time, _, _)) = self.bio_submit.remove(&bio_ptr) {
+                            block_latency = event.timestamp - submit_time;
+                            self.stats.block_layer_latency.push(block_latency);
+                        }
+                    }
+                    // request_ptr 기반으로 저장 → nvme_complete에서 request_ptr로 lookup
+                    self.nvme_requests.insert(event.request_ptr, (event.timestamp, dev, sector));
+                    let (maj, min) = dev_to_maj_min(dev);
+                    println!(
+                        "[{:>12}] NVMe Queue: request_ptr: {:#x}, tag: {}, tgid: {}, dev: ({},{}), sector: {}, block_layer_latency: {} ns, bio_ptr: {:#x}",
+                        event.timestamp, event.request_ptr, event.tag, event.tgid, maj, min, sector, block_latency, bio_ptr
+                    );
+                }
+            }
+
+            EventType::NvmeQueueExit => {
+                if let Some((queue_time, dev, sector)) =
+                    self.nvme_requests.remove(&event.request_ptr)
+                {
+                    let (maj, min) = dev_to_maj_min(dev);
+                    println!(
+                        "[{:>12}] NVMe Queue Exit: request_ptr: {:#x}, tgid: {}, dev: ({},{}), sector: {}, latency {} ns",
+                        event.timestamp, event.request_ptr, event.tgid, maj, min, sector, (event.timestamp - queue_time)
+                    );
+                    self.nvme_requests.insert(event.request_ptr, (event.timestamp, dev, sector));
+                }
+            }
+
+            EventType::NvmeCompleteBatch => {
                 if let Some((queue_time, dev, sector)) =
                     self.nvme_requests.remove(&event.request_ptr)
                 {
@@ -182,77 +168,41 @@ impl IoTracker {
                     self.stats.nvme_latency.push(nvme_latency);
                     let (maj, min) = dev_to_maj_min(dev);
                     println!(
-                        "[{:>12}] NVMe Complete(batch): request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
-                        event.timestamp,
-                        event.request_ptr,
-                        maj,
-                        min,
-                        sector,
-                        nvme_latency
+                        "[{:>12}] NVMe Complete(batch): request_ptr: {:#x}, dev: ({},{}), sector: {}, device_latency: {} ns",
+                        event.timestamp, event.request_ptr, maj, min, sector, nvme_latency
                     );
                 }
             }
-            EVENT_NVME_COMPLETE => {
+
+            EventType::NvmeComplete => {
                 if let Some((queue_time, dev, sector)) =
                     self.nvme_requests.remove(&event.request_ptr)
                 {
                     let nvme_latency = event.timestamp - queue_time;
                     self.stats.nvme_latency.push(nvme_latency);
                     let (maj, min) = dev_to_maj_min(dev);
-
                     println!(
-                        "[{:>12}] NVMe Complete       : request_ptr: {:#x}, dev: ({},{}), sector: {}, latency: {} ns",
-                        event.timestamp,
-                        event.request_ptr,
-                        maj,
-                        min,
-                        sector,
-                        nvme_latency
+                        "[{:>12}] NVMe Complete: request_ptr: {:#x}, dev: ({},{}), sector: {}, device_latency: {} ns",
+                        event.timestamp, event.request_ptr, maj, min, sector, nvme_latency
                     );
                 }
             }
-            
-            EVENT_VFS_WRITE => {
-                let (maj, min) = dev_to_maj_min(event.dev);
-                println!(
-                        "[{:>12}] vfs_write: tgid: {}, dev: ({}, {}), inode: {}",
-                        event.timestamp,
-                        event.tgid,
-                        maj,
-                        min,
-                        event.inode
-                    );
-                self.vfs_requests = event.timestamp;
-            }
-            
-            EVENT_FS_NEW_SYNC_WRITE => {
-                println!(
-                        "[{:>12}] new_sync_write: tgid: {}",
-                        event.timestamp,
-                        event.tgid
-                    );
-            }
-
-            _ => {}
         }
     }
 
     fn print_avg(name: &str, data: &[u64]) {
         if !data.is_empty() {
             let avg = data.iter().sum::<u64>() / data.len() as u64;
-            println!("{name} avg latency: {avg} ns");
+            println!("{name} avg latency: {avg} ns ({} samples)", data.len());
         }
     }
 
     fn print_stats(&self) {
-        println!("\n=== I/O Statistics ===");
-        
-        Self::print_avg("VFS->FS", &self.stats.vfs_to_fs_latency);
-        Self::print_avg("Page Cache", &self.stats.fs_page_cache_latency);
-        Self::print_avg("FS->BIO", &self.stats.fs_to_bio_latency);
-        Self::print_avg("BIO", &self.stats.bio_latency);
-        Self::print_avg("BIO->NVMe", &self.stats.bio_to_nvme_latency);
-        Self::print_avg("NVMe", &self.stats.nvme_latency);
+        println!("\n=== I/O Latency Statistics ===");
+        Self::print_avg("Page Cache (generic_perform_write → vfs_write ret)", &self.stats.vfs_latency);
+        Self::print_avg("BLK Request (submit_bio → blk_mq_start_request)", &self.stats.blk_request_latency);
+        Self::print_avg("Block Layer (submit_bio → nvme_queue_rq)", &self.stats.block_layer_latency);
+        Self::print_avg("NVMe (nvme_queue_rq → nvme_complete)", &self.stats.nvme_latency);
     }
 }
 
@@ -260,6 +210,14 @@ fn attach_kprobe(ebpf: &mut aya::Ebpf, prog: &str, fn_name: &str) -> anyhow::Res
     let program: &mut KProbe = ebpf.program_mut(prog).unwrap().try_into()?;
     program.load()?;
     program.attach(fn_name, 0)?;
+    Ok(())
+}
+
+fn attach_fexit(ebpf: &mut aya::Ebpf, prog: &str, fn_name: &str) -> anyhow::Result<()> {
+    let btf = aya::Btf::from_sys_fs()?;
+    let program: &mut FExit = ebpf.program_mut(prog).unwrap().try_into()?;
+    program.load(fn_name, &btf)?;
+    program.attach()?;
     Ok(())
 }
 
@@ -296,19 +254,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // eBPF Probe Initialization
-    attach_kprobe(&mut ebpf, "vfs_vfs_write", "vfs_write");
-    if let Err(e) = attach_kprobe(&mut ebpf, "fs_new_sync_write", "new_sync_write") {
-        warn!("Failed to init: new_sync_write");
+    let _ = attach_kprobe(&mut ebpf, "vfs_vfs_write", "vfs_write");
+
+    let _ = attach_kprobe(&mut ebpf, "fs_generic_perform_write", "generic_perform_write");
+    if let Err(e) = attach_kprobe(&mut ebpf, "fs_iomap_file_buffered_write", "iomap_file_buffered_write") {
+        warn!("Failed to init: iomap_file_buffered_write");
     }
+
+    let _ = attach_kprobe(&mut ebpf, "vfs_vfs_write_ret", "vfs_write");
     
-    attach_kprobe(&mut ebpf, "bio_submit_bio", "submit_bio");
-    attach_kprobe(&mut ebpf, "bio_bio_endio", "bio_endio");
+    let _ = attach_kprobe(&mut ebpf, "bio_submit_bio", "submit_bio");
+    let _ = attach_kprobe(&mut ebpf, "bio_bio_endio", "bio_endio");
     
-    attach_kprobe(&mut ebpf, "dev_nvme_queue_rq", "nvme_queue_rq");
-    attach_kprobe(&mut ebpf, "dev_nvme_complete_batch_req", "nvme_complete_batch_req");
-    attach_kprobe(&mut ebpf, "dev_nvme_complete_rq", "nvme_complete_rq");
+    if let Err(e) = attach_kprobe(&mut ebpf, "dev_nvme_queue_rq_exit", "nvme_queue_rq") {
+        warn!("Failed to init: nvme_queue_rq fexit, {}", e.to_string());
+    }
+
+    let _ = attach_kprobe(&mut ebpf, "dev_nvme_queue_rq", "nvme_queue_rq");
+    let _ = attach_kprobe(&mut ebpf, "dev_nvme_complete_batch_req", "nvme_complete_batch_req");
+    let _ = attach_kprobe(&mut ebpf, "dev_nvme_complete_rq", "nvme_complete_rq");
         
-    attach_kprobe(&mut ebpf, "bio_blk_mq_start_request", "blk_mq_start_request");
+    let _ = attach_kprobe(&mut ebpf, "bio_blk_mq_start_request", "blk_mq_start_request");
 
     // Target PID를 eBPF Map에 설정
     let mut pid_map: aya::maps::Array<_, u32> =
