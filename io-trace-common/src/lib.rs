@@ -1,9 +1,24 @@
 #![no_std]
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventType {
+    VfsWrite = 0,
+    GenericPerformWrite = 1,
+    VfsWriteRet = 2,
+    BioSubmit = 3,
+    BioComplete = 4,
+    BlkMqStartRequest = 5,
+    NvmeQueue = 6,
+    NvmeQueueExit = 7,
+    NvmeCompleteBatch = 8,
+    NvmeComplete = 9,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct IoEvent {
-    pub event_type: u32,
+    pub event_type: EventType,
     pub timestamp: u64,
     pub tgid: u32,
     pub pid: u32,
@@ -17,22 +32,6 @@ pub struct IoEvent {
     pub size: u32,
     pub flags: u32,
 }
-
-// 이벤트 타입
-pub const EVENT_BTREE_WRITEPAGES:         u32 = 0;
-pub const EVENT_BTRFS_WRITEPAGES:         u32 = 1;
-pub const EVENT_BIO_SUBMIT:               u32 = 2;
-pub const EVENT_BIO_COMPLETE:             u32 = 3;
-pub const EVENT_NVME_QUEUE:               u32 = 4;
-pub const EVENT_NVME_COMPLETE_BATCH:      u32 = 5;
-pub const EVENT_NVME_COMPLETE:            u32 = 6;
-pub const EVENT_BLK_MQ_START_REQUEST:     u32 = 7;
-pub const EVENT_VFS_WRITE:                u32 = 8;
-pub const EVENT_VFS_WRITEV:               u32 = 9;
-pub const EVENT_BTRFS_DO_WRITE_ITER:      u32 = 10;
-pub const EVENT_BTRFS_BUFFERED_WRITE:     u32 = 11;
-pub const EVENT_BTRFS_BUFFERED_WRITE_RET: u32 = 12;
-pub const EVENT_FS_NEW_SYNC_WRITE:        u32 = 13;
 
 pub fn dev_to_maj_min(dev: u32) -> (u32, u32) {
     let maj: u32 = dev >> 20;

@@ -12,6 +12,7 @@ aya-tool generate \
   blk_mq_queue_data \
   request \
   address_space \
+  address_space_operations \
   writeback_control \
   kiocb \
   file \
