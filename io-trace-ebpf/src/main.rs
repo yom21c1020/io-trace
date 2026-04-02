@@ -12,6 +12,12 @@ use aya_ebpf::macros::map;
 use aya_ebpf::{
     macros::{kprobe, kretprobe}, programs::{ProbeContext, RetProbeContext}
 };
+use aya_ebpf::maps::{
+    PerfEventArray,
+    Array,
+    PerCpuArray,
+    HashMap,
+};
 use aya_log_ebpf::{debug, info};
 
 use nvme::{nvme_dev, nvme_queue};
@@ -23,10 +29,13 @@ use crate::vmlinux::dev_t;
 use io_trace_common::*;
 
 #[map]
-static EVENTS: aya_ebpf::maps::PerfEventArray<IoEvent> = aya_ebpf::maps::PerfEventArray::new(0);
+static EVENTS: PerfEventArray<IoEvent> = PerfEventArray::new(0);
 
 #[map]
-static TARGET_PID_MAP: aya_ebpf::maps::Array<u32> = aya_ebpf::maps::Array::with_max_entries(1, 0);
+static TARGET_PID_MAP: Array<u32> = Array::with_max_entries(1, 0);
+
+#[map]
+static IN_NVME_QUEUE_RQ: PerCpuArray<u8> = PerCpuArray::with_max_entries(1, 0);
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -37,7 +46,7 @@ struct RequestKey {
 }
 
 #[map]
-static ENTRY_MAP: aya_ebpf::maps::PerCpuHashMap<u32, EntryData> = aya_ebpf::maps::PerCpuHashMap::with_max_entries(128, 0);
+static ENTRY_MAP: HashMap<u32, EntryData> = HashMap::with_max_entries(1024, 0);
 
 #[derive(Clone, Copy)]
 struct EntryData {
@@ -46,7 +55,10 @@ struct EntryData {
 }
 
 #[map]
-static BIO_MAP: aya_ebpf::maps::HashMap<u64, u64> = aya_ebpf::maps::HashMap::with_max_entries(1024, 0); // bio_ptr -> entry timestamp
+static BIO_MAP: HashMap<u64, u64> = HashMap::with_max_entries(8192, 0); // bio_ptr -> entry timestamp
+
+#[map]
+static NVME_DEVICE_MAP: HashMap<u64, u64> = HashMap::with_max_entries(1024, 0); // request_ptr -> nvme_queue_rq_exit timestamp
 
 const ERR_CODE: u32 = 1;
 
@@ -317,7 +329,7 @@ fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
 
         debug!(&ctx, "submit_bio hit, tgid {}, pid {}, bio_ptr {:x}, dev ({}, {}), sector {}, size {}", tgid, pid, req_ptr as u64, maj, min, bi_sector, bi_size);
 
-        if !check_tgid(tgid) { BIO_MAP.insert(&(req_ptr as u64), &timestamp, 0).ok(); }
+        BIO_MAP.insert(&(req_ptr as u64), &timestamp, 0).ok();
 
         let event = IoEvent {
             event_type: EventType::BioSubmit,
@@ -394,11 +406,12 @@ pub fn bio_blk_mq_start_request(ctx: ProbeContext) -> u32 {
 
 fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
-        let tgid: u32 = ctx.tgid();
-        if !check_tgid(tgid) {
+        let in_ctx = IN_NVME_QUEUE_RQ.get(0).copied().unwrap_or(0);
+        if in_ctx == 0 {
             return Ok(0);
         }
 
+        let tgid: u32 = ctx.tgid();
         let pid: u32 = ctx.pid();
 
         let timestamp: u64 = helpers::r#gen::bpf_ktime_get_ns();
@@ -412,6 +425,8 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
 
         let mut maj: u32 = 0;
         let mut min: u32 = 0;
+
+        debug!(&ctx, "blk_mq_start_request hit /////// bio_ptr: {:x}", bio_ptr as u64);
         if bio_ptr != core::ptr::null() {
             (bd_dev, bi_sector) = bio_parse(bio_ptr)?;
             (maj, min) = dev_to_maj_min(bd_dev);
@@ -451,9 +466,16 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
 
         let hctx_ptr: *const blk_mq_hw_ctx = ctx.arg(0).ok_or(ERR_CODE)?;
         let bd_ptr: *const blk_mq_queue_data = ctx.arg(1).ok_or(ERR_CODE)?;
+        
+        if let Some(flag) = IN_NVME_QUEUE_RQ.get_ptr_mut(0) {
+            *flag = 1;
+        }
+
         if ptr_field_is_null!(bd_ptr, blk_mq_queue_data, rq, request) {
+            debug!(&ctx, "nvme_queue_rq //// pid {}, req_ptr null, ", pid);
             return Err(0);
         }
+        
         let req_ptr: *const request =
             read_ptr_field!(bd_ptr, blk_mq_queue_data, rq, request).map_err(|_| ERR_CODE)?;
         let tag: i32 = read_field!(req_ptr, request, tag, i32).map_err(|_| ERR_CODE)?;
@@ -470,18 +492,19 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
         }
         
         
+        debug!(&ctx, "nvme_queue_rq hit ////// pid {}, req_ptr {:x}, tag {}, bio_ptr {:x}", pid, req_ptr as u64, tag, bio_ptr as u64);
 
-        debug!(&ctx, "nvme_queue_rq //// pid {}, req_ptr {:x}, tag {}, bio_ptr {:x}", pid, req_ptr as u64, tag, bio_ptr_val);
+
+        // driver latency 측정을 위해 ENTRY_MAP은 항상 저장 (kprobe/kretprobe 동일 컨텍스트)
+        let data = EntryData {
+            req_ptr: req_ptr as u64,
+            ts_entry: timestamp,
+        };
+        ENTRY_MAP.insert(&pid, &data, 0).ok();
 
         if let Some(&entry_ts) = BIO_MAP.get(&(bio_ptr_val)) {
             BIO_MAP.remove(&(bio_ptr as u64)).ok();
             debug!(&ctx, "nvme_queue_rq hit with pid {}, bio_ptr {:x}, elapsed {} ns", pid, bio_ptr as u64, timestamp - entry_ts);
-
-            let data = EntryData {
-                req_ptr: req_ptr as u64,
-                ts_entry: timestamp,
-            };
-            ENTRY_MAP.insert(&pid, &data, 0).ok();
 
             let event = IoEvent {
                 event_type: EventType::NvmeQueue,
@@ -521,9 +544,16 @@ fn try_dev_nvme_queue_rq_exit(ctx: RetProbeContext) -> Result<u32, u32> {
         let tgid = ctx.tgid();
         let pid = ctx.pid();
 
+        if let Some(flag) = IN_NVME_QUEUE_RQ.get_ptr_mut(0) {
+            *flag = 0;
+        }
+        
         if let Some(&data) = ENTRY_MAP.get(&pid) {
-            debug!(&ctx, "nvme_queue_rq ret: pid {}, req_ptr {:x}, elapsed {} ns", pid, data.req_ptr, (timestamp - data.ts_entry));
+            debug!(&ctx, "nvme_queue_rq ret: pid {}, req_ptr {:x}, driver_latency {} ns", pid, data.req_ptr, (timestamp - data.ts_entry));
             ENTRY_MAP.remove(&pid).ok();
+
+            // device latency 측정 시작점: request_ptr → exit timestamp
+            NVME_DEVICE_MAP.insert(&data.req_ptr, &timestamp, 0).ok();
 
             let event = IoEvent {
                 event_type: EventType::NvmeQueueExit,
@@ -538,6 +568,7 @@ fn try_dev_nvme_queue_rq_exit(ctx: RetProbeContext) -> Result<u32, u32> {
                 size: 0,
                 flags: 0,
             };
+            EVENTS.output(&ctx, &event, 0);
         }
 
         
