@@ -13,3 +13,6 @@ gmon.out
 
 # logs
 *.log
+
+# local todo (intentionally untracked)
+TODO.md
