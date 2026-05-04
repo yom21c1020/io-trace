@@ -13,9 +13,9 @@ use io_trace_common::*;
 
 #[derive(Parser)]
 struct Args {
-    /// Target process ID (TGID) to trace
+    /// Target process ID (TGID) to trace. Omit to trace all processes (VFS layer disabled).
     #[arg(short = 'p', long = "pid")]
-    pid: u32,
+    pid: Option<u32>,
 }
 
 struct IoTracker {
@@ -215,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
 
     // CLI 인자 파싱
     let args = Args::parse();
-    let target_pid = args.pid;
+    let target_pid = args.pid.unwrap_or(0);
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -242,15 +242,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // eBPF Probe Initialization
-    let _ = attach_kprobe(&mut ebpf, "vfs_vfs_write", "vfs_write");
-
-    let _ = attach_kprobe(&mut ebpf, "fs_generic_perform_write", "generic_perform_write");
-    if let Err(e) = attach_kprobe(&mut ebpf, "fs_iomap_file_buffered_write", "iomap_file_buffered_write") {
-        warn!("Failed to init: iomap_file_buffered_write");
+    // VFS 계층은 PID가 지정된 경우에만 attach
+    if target_pid != 0 {
+        let _ = attach_kprobe(&mut ebpf, "vfs_vfs_write", "vfs_write");
+        let _ = attach_kprobe(&mut ebpf, "fs_generic_perform_write", "generic_perform_write");
+        if let Err(_) = attach_kprobe(&mut ebpf, "fs_iomap_file_buffered_write", "iomap_file_buffered_write") {
+            warn!("Failed to init: iomap_file_buffered_write");
+        }
+        let _ = attach_kprobe(&mut ebpf, "vfs_vfs_write_ret", "vfs_write");
     }
 
-    let _ = attach_kprobe(&mut ebpf, "vfs_vfs_write_ret", "vfs_write");
-    
     let _ = attach_kprobe(&mut ebpf, "bio_submit_bio", "submit_bio");
     let _ = attach_kprobe(&mut ebpf, "bio_bio_endio", "bio_endio");
     
@@ -294,8 +295,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    println!("All probes attached, starting tracing with TGID: {}", target_pid);
-    
+    if target_pid != 0 {
+        println!("All probes attached, tracing TGID: {}", target_pid);
+    } else {
+        println!("All probes attached, tracing all processes (VFS layer disabled)");
+    }
+
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
     ctrl_c.await?;

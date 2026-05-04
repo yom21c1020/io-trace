@@ -65,9 +65,12 @@ const ERR_CODE: u32 = 1;
 fn check_tgid(tgid: u32) -> bool {
     unsafe {
         if let Some(target_tgid) = TARGET_PID_MAP.get(0) {
+            // 0 = no filter (PID 미지정)
+            if *target_tgid == 0 {
+                return true;
+            }
             return tgid == *target_tgid;
         }
-        // Map이 비어있으면 추적하지 않음
         false
     }
 }
