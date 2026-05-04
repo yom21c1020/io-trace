@@ -13,7 +13,6 @@ aya-tool generate \
   request \
   address_space \
   address_space_operations \
-  writeback_control \
   kiocb \
   file \
   inode \

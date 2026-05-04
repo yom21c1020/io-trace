@@ -20,13 +20,24 @@ use aya_ebpf::maps::{
 };
 use aya_log_ebpf::{debug, info};
 
-use nvme::{nvme_dev, nvme_queue};
+use nvme::nvme_queue;
 use vmlinux::*;
 
-use crate::nvme::{blk_mq_hw_ctx, request_queue};
+use crate::nvme::blk_mq_hw_ctx;
 use crate::vmlinux::dev_t;
 
 use io_trace_common::*;
+
+macro_rules! define_probe {
+    (#[$attr:meta] $name:ident, $ctx:ty, $try_fn:ident) => {
+        #[$attr]
+        pub fn $name(ctx: $ctx) -> u32 {
+            match $try_fn(ctx) {
+                Ok(ret) | Err(ret) => ret,
+            }
+        }
+    };
+}
 
 #[map]
 static EVENTS: PerfEventArray<IoEvent> = PerfEventArray::new(0);
@@ -36,14 +47,6 @@ static TARGET_PID_MAP: Array<u32> = Array::with_max_entries(1, 0);
 
 #[map]
 static IN_NVME_QUEUE_RQ: PerCpuArray<u8> = PerCpuArray::with_max_entries(1, 0);
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct RequestKey {
-    tgid: u32,
-    dev: u32,
-    sector: u64,
-}
 
 #[map]
 static ENTRY_MAP: HashMap<u32, EntryData> = HashMap::with_max_entries(1024, 0);
@@ -114,13 +117,7 @@ fn bio_get_start_sector(bio_ptr: *const bio) -> Result<u64, u32> {
 
 // Probing
 
-#[kprobe]
-pub fn vfs_vfs_write(ctx: ProbeContext) -> u32 {
-    match try_vfs_vfs_write(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
+define_probe!(#[kprobe] vfs_vfs_write, ProbeContext, try_vfs_vfs_write);
 fn try_vfs_vfs_write(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
@@ -175,13 +172,7 @@ fn try_vfs_vfs_write(ctx: ProbeContext) -> Result<u32, u32> {
     }
 }
 
-#[kretprobe]
-pub fn vfs_vfs_write_ret(ctx: RetProbeContext) -> u32 {
-    match try_vfs_vfs_write_ret(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
+define_probe!(#[kretprobe] vfs_vfs_write_ret, RetProbeContext, try_vfs_vfs_write_ret);
 fn try_vfs_vfs_write_ret(ctx: RetProbeContext) -> Result<u32, u32> {
     unsafe{
         let tgid: u32 = ctx.tgid();
@@ -213,13 +204,7 @@ fn try_vfs_vfs_write_ret(ctx: RetProbeContext) -> Result<u32, u32> {
     }
 }
 
-#[kprobe]
-pub fn fs_generic_perform_write(ctx: ProbeContext) -> u32 {
-    match try_fs_generic_perform_write(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
+define_probe!(#[kprobe] fs_generic_perform_write, ProbeContext, try_fs_generic_perform_write);
 fn try_fs_generic_perform_write(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
@@ -275,13 +260,7 @@ fn try_fs_generic_perform_write(ctx: ProbeContext) -> Result<u32, u32> {
     }
 }
 
-#[kprobe]
-pub fn fs_iomap_file_buffered_write(ctx: ProbeContext) -> u32 {
-    match try_fs_iomap_file_buffered_write(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
+define_probe!(#[kprobe] fs_iomap_file_buffered_write, ProbeContext, try_fs_iomap_file_buffered_write);
 fn try_fs_iomap_file_buffered_write(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
@@ -295,14 +274,7 @@ fn try_fs_iomap_file_buffered_write(ctx: ProbeContext) -> Result<u32, u32> {
     }
 }
 
-#[kprobe]
-pub fn bio_submit_bio(ctx: ProbeContext) -> u32 {
-    match try_bio_submit_bio(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
-
+define_probe!(#[kprobe] bio_submit_bio, ProbeContext, try_bio_submit_bio);
 fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
 
@@ -353,14 +325,7 @@ fn try_bio_submit_bio(ctx: ProbeContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-#[kprobe]
-pub fn bio_bio_endio(ctx: ProbeContext) -> u32 {
-    match try_bio_bio_endio(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
-
+define_probe!(#[kprobe] bio_bio_endio, ProbeContext, try_bio_bio_endio);
 fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
@@ -399,14 +364,7 @@ fn try_bio_bio_endio(ctx: ProbeContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-#[kprobe]
-pub fn bio_blk_mq_start_request(ctx: ProbeContext) -> u32 {
-    match try_bio_blk_mq_start_request(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
-
+define_probe!(#[kprobe] bio_blk_mq_start_request, ProbeContext, try_bio_blk_mq_start_request);
 fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let in_ctx = IN_NVME_QUEUE_RQ.get(0).copied().unwrap_or(0);
@@ -453,14 +411,7 @@ fn try_bio_blk_mq_start_request(ctx: ProbeContext) -> Result<u32, u32> {
     }
 }
 
-#[kprobe]
-pub fn dev_nvme_queue_rq(ctx: ProbeContext) -> u32 {
-    match try_dev_nvme_queue_rq(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
-
+define_probe!(#[kprobe] dev_nvme_queue_rq, ProbeContext, try_dev_nvme_queue_rq);
 fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
@@ -531,13 +482,7 @@ fn try_dev_nvme_queue_rq(ctx: ProbeContext) -> Result<u32, u32> {
     }
 }
 
-#[kretprobe]
-pub fn dev_nvme_queue_rq_exit(ctx: RetProbeContext) -> u32 {
-    match try_dev_nvme_queue_rq_exit(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
+define_probe!(#[kretprobe] dev_nvme_queue_rq_exit, RetProbeContext, try_dev_nvme_queue_rq_exit);
 fn try_dev_nvme_queue_rq_exit(ctx: RetProbeContext) -> Result<u32, u32> {
     unsafe {
         let ret: u32 = ctx.ret().unwrap_or(1);
@@ -579,14 +524,7 @@ fn try_dev_nvme_queue_rq_exit(ctx: RetProbeContext) -> Result<u32, u32> {
     }
 }
 
-#[kprobe]
-pub fn dev_nvme_complete_batch_req(ctx: ProbeContext) -> u32 {
-    match try_dev_nvme_complete_batch_req(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
-
+define_probe!(#[kprobe] dev_nvme_complete_batch_req, ProbeContext, try_dev_nvme_complete_batch_req);
 fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         let tgid: u32 = ctx.tgid();
@@ -626,13 +564,7 @@ fn try_dev_nvme_complete_batch_req(ctx: ProbeContext) -> Result<u32, u32> {
     Ok(0)
 }
 
-#[kprobe]
-pub fn dev_nvme_complete_rq(ctx: ProbeContext) -> u32 {
-    match try_dev_nvme_complete_rq(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
+define_probe!(#[kprobe] dev_nvme_complete_rq, ProbeContext, try_dev_nvme_complete_rq);
 fn try_dev_nvme_complete_rq(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
         // let time: u64 = helpers::r#gen::bpf_ktime_get_ns();
