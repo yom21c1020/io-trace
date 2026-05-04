@@ -162,10 +162,6 @@ impl IoTracker {
                 }
             }
 
-            EventType::NvmeQueueRaw => {
-                // probe disabled, no-op
-            }
-
             EventType::NvmeComplete => {
                 if let Some((_, dev, sector)) = self.nvme_requests.remove(&event.request_ptr) {
                     if let Some(device_start) = self.nvme_device_start.remove(&event.request_ptr) {

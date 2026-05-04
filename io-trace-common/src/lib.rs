@@ -13,7 +13,6 @@ pub enum EventType {
     NvmeQueueExit = 7,
     NvmeCompleteBatch = 8,
     NvmeComplete = 9,
-    NvmeQueueRaw = 10,
 }
 
 #[repr(C)]
