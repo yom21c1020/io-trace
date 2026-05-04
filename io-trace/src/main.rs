@@ -16,6 +16,22 @@ struct Args {
     /// Target process ID (TGID) to trace. Omit to trace all processes (VFS layer disabled).
     #[arg(short = 'p', long = "pid")]
     pid: Option<u32>,
+
+    /// Stop tracing after this duration (e.g. 1s, 30s, 1m, 1h)
+    #[arg(short = 't', long = "time")]
+    time: Option<String>,
+}
+
+fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
+    if let Some(n) = s.strip_suffix('h') {
+        Ok(std::time::Duration::from_secs(n.parse::<u64>()? * 3600))
+    } else if let Some(n) = s.strip_suffix('m') {
+        Ok(std::time::Duration::from_secs(n.parse::<u64>()? * 60))
+    } else if let Some(n) = s.strip_suffix('s') {
+        Ok(std::time::Duration::from_secs(n.parse()?))
+    } else {
+        anyhow::bail!("invalid duration '{}': expected format like 1s, 30s, 1m, 1h", s)
+    }
 }
 
 struct IoTracker {
@@ -216,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
     // CLI 인자 파싱
     let args = Args::parse();
     let target_pid = args.pid.unwrap_or(0);
+    let duration = args.time.as_deref().map(parse_duration).transpose()?;
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -300,10 +317,22 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("All probes attached, tracing all processes (VFS layer disabled)");
     }
+    match &duration {
+        Some(d) => println!("Will stop after {:?}. Press Ctrl-C to stop early.", d),
+        None => println!("Press Ctrl-C to stop."),
+    }
 
-    let ctrl_c = signal::ctrl_c();
-    println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
+    tokio::select! {
+        _ = signal::ctrl_c() => {}
+        _ = async {
+            match duration {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending::<()>().await,
+            }
+        } => {
+            println!("Time limit reached.");
+        }
+    }
     tracker.lock().unwrap().print_stats();
     println!("Exiting...");
 

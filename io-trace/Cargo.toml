@@ -21,6 +21,7 @@ tokio = { workspace = true, features = [
     "rt-multi-thread",
     "net",
     "signal",
+    "time",
 ] }
 bytes = "1.10.1"
 [build-dependencies]
