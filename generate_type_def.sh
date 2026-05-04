@@ -16,10 +16,10 @@ aya-tool generate \
   kiocb \
   file \
   inode \
-  >io-trace-ebpf/src/vmlinux.rs
+  >io-trace-ebpf/src/btf/vmlinux.rs
 
 # aya-tool generate \
 # 	--btf /sys/kernel/btf/nvme \
 # 	nvme_queue \
 # 	nvme_dev \
-# 	> io-trace-ebpf/src/nvme.rs
+# 	> io-trace-ebpf/src/btf/nvme.rs
