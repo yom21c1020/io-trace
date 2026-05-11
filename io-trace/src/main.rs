@@ -268,6 +268,13 @@ async fn main() -> anyhow::Result<()> {
         }
         let _ = attach_kprobe(&mut ebpf, "vfs_vfs_write_ret", "vfs_write");
     }
+    if let Err(e) = attach_kprobe(&mut ebpf, "fs_do_writepages", "do_writepages") {
+            warn!("Failed to init: do_writepages: {e:#}");
+        }
+
+    if let Err(e) = attach_fexit(&mut ebpf, "fs_ext4_map_blocks", "ext4_map_blocks") {
+            warn!("Failed to init: ext4_map_blocks: {e:#}");
+        }
 
     let _ = attach_kprobe(&mut ebpf, "bio_submit_bio", "submit_bio");
     let _ = attach_kprobe(&mut ebpf, "bio_bio_endio", "bio_endio");

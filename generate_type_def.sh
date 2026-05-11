@@ -16,6 +16,7 @@ aya-tool generate \
   kiocb \
   file \
   inode \
+  ext4_map_blocks \
   >io-trace-ebpf/src/btf/vmlinux.rs
 
 # aya-tool generate \
